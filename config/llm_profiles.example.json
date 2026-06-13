@@ -1,0 +1,14 @@
+{
+  "active": "default",
+  "profiles": [
+    {
+      "name": "default",
+      "provider": "minimax",
+      "model": "MiniMax-M3",
+      "base_url": "https://api.minimaxi.com/v1",
+      "api_key": "",
+      "temperature": 0.8,
+      "max_tokens": 2048
+    }
+  ]
+}

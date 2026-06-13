@@ -1,0 +1,22 @@
+# AI_gf_momo - 智能女友小桃
+# Python 依赖
+
+# Web框架
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+websockets==14.1
+
+# 配置管理
+pydantic-settings==2.7.1
+pyyaml==6.0.2
+
+# 数据库
+sqlalchemy==2.0.36
+aiosqlite==0.20.0
+
+# HTTP客户端
+httpx==0.28.1
+
+# 工具
+python-dotenv==1.0.1
+python-multipart==0.0.19

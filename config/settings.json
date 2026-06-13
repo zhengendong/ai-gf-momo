@@ -1,0 +1,27 @@
+{
+  "active_character": "momo",
+  "context": {
+    "max_tokens": 2000,
+    "compress_at": 0.7
+  },
+  "comfyui": {
+    "workflow": "waiNSFWIllustrious_v140.json",
+    "negative_prompt": "bad quality,worst quality,worst detail,sketch,censor",
+    "sampler": "euler",
+    "scheduler": "simple",
+    "steps": 20,
+    "cfg": 5,
+    "width": 1024,
+    "height": 1024
+  },
+  "heartbeat": {
+    "interval_minutes": 30,
+    "quiet_start": "23:00",
+    "quiet_end": "08:00"
+  },
+  "memory": {
+    "condensation_time": "02:00",
+    "condensation_days": 1,
+    "retention_days": 30
+  }
+}
