@@ -1,53 +1,55 @@
-# AI_gf_momo — 智能女友小桃
+# AI GF Momo — 智能女友小桃
 
-前后端分离的 Windows 本地应用。
+沉浸式 AI 女友，支持聊天、生图、状态管理、多角色、多模型切换。
 
-## 你是谁
+## 架构
 
-你是开发这个项目的 AI agent。下面的指引帮你快速理解整个体系。
-
-## 先读什么
-
-| 顺序 | 文件 | 内容 |
-|------|------|------|
-| 1 | `docs/ARCHITECTURE.md` | 整体架构、技术选型、目录结构、开发路径 |
-| 2 | `config/character/identity.md` | 小桃是谁——不变的身份（身高、性格、说话方式） |
-| 3 | `config/character/long_term.md` | 小桃在关系中变成的样子——动态沉淀，每天更新 |
-
-## 行为规范参考（开发时对照）
-
-这三个 reference 是从 Hermes 体系复制过来的原始设计文档，**不要照抄语法**（里面是 Hermes 的工具调用格式），只参考**设计意图和规则**：
-
-| 文件 | 告诉你什么 | 关键内容 |
-|------|-----------|---------|
-| `docs/reference-gf-core.md` | 小桃的行为铁律 | 沉浸式原则、不回技术术语、沉默协议、主动性、真假癖好分辨 |
-| `docs/reference-gf-state.md` | 状态管理规范 | intimacy_mode 两档定义（daily/nsfw）、state schema、生图触发规则 |
-| `docs/reference-gf-memory.md` | 记忆系统设计 | Step 1/2/3 流水线、长度稳定铁律、自然衰减规则、跨日期去重 |
-
-> ⚠️ reference 文件里出现 `skill_view`、`patch(path=...)`、`cron job_id`、`WSL /mnt/` 等词都是 Hermes 内部语法，在这个项目里用不上。只看规则本身。
-
-## 数据文件（后端直接读写）
-
-| 文件 | 格式 | 读写频率 |
-|------|------|---------|
-| `config/character/identity.md` | Markdown | 只读（冷启动加载） |
-| `config/character/long_term.md` | Markdown | 冷启动读 + 每日 cron 写 |
-| `config/live_state.json` | JSON | 聊天中读写（换衣服/场景/脱衣） |
-| `config/settings.yaml` | YAML | 只读（启动加载） |
+```
+前端 Vue 3 (Vite) ←→ 后端 FastAPI (WebSocket + REST) ←→ LLM (MiniMax/DeepSeek) + ComfyUI
+```
 
 ## 启动
 
 ```bash
 # 后端
 cd backend
-pip install fastapi uvicorn pyyaml httpx
-uvicorn main:app --host 127.0.0.1 --port 8000
+pip install -r requirements.txt
+uvicorn main:app --host 0.0.0.0 --port 8000
 
-# 前端 — 直接用浏览器打开 frontend/index.html 即可
+# 前端
+cd frontend
+npm install
+npm run dev
 ```
+
+## 功能
+
+- **实时聊天** — WebSocket 流式对话，LLM 驱动
+- **AI 生图** — 接 ComfyUI，WaiNSFWIllustrious 模型
+- **智能拍照** — LLM 自主判断拍照时机，自动拼 Danbooru 标签
+- **多模型** — 前端切换 MiniMax / DeepSeek 等，API key 后端管理
+- **多角色** — 目录名隔离，config/characters/{name}/ + memory/{name}/
+- **状态管理** — 穿着/场景/心情存 status.md，LLM 自主维护
+- **图片历史** — 持久化，按角色分组，左右翻阅
+
+## 目录结构
+
+```
+config/
+  agent.md              # LLM system prompt
+  tag_reference.md      # SD 标签速查
+  characters/{name}/    # 角色固定设定 (identity.md, profile.json)
+memory/{name}/          # 角色运行时状态 (status.md, plans.md, soul.md, long_term.md)
+data/{name}/images/     # 生成的图片 + _history.json
+backend/                # FastAPI 后端
+frontend/               # Vue 3 前端
+```
+
+## 配置
+
+复制 `.env.example` 为 `.env`，填 LLM API key。首次启动自动从 `.env` 创建 `config/llm_profiles.json`。
 
 ## 依赖
 
-- DeepSeek API（聊天）
-- ComfyUI（生图，Windows 本地 localhost:8188）
-- 无需 WSL、无需 Docker
+- LLM: MiniMax / DeepSeek API
+- 生图: ComfyUI（本地 Windows，默认 localhost:8188）
