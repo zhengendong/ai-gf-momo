@@ -7,10 +7,17 @@ const characters = ref([])
 const activeCharId = ref('')  // 目录名（API 标识），不是显示名
 const profile = reactive({
   name: '',
+  gender: 'female',
   avatar: '',
   avatar_role: '',
   body_type: '',
-  appearance: ''
+  appearance: '',
+  visual_anchor: {
+    preset_name: '',
+    role_tags: '',
+    body_tags: '',
+    appearance_tags: ''
+  }
 })
 const loading = ref(false)
 
@@ -34,7 +41,27 @@ export function useCharacter() {
   const loadProfile = async (charId) => {
     try {
       const p = await fetch(`${API}/characters/${charId}/profile`).then(r => r.json())
-      Object.assign(profile, { name: '', avatar: '', avatar_role: '', body_type: '', appearance: '' }, p)
+      const visual = {
+        preset_name: '',
+        role_tags: p.avatar_role || '',
+        body_tags: p.body_type || '',
+        appearance_tags: p.appearance || '',
+        ...(p.visual_anchor || {})
+      }
+      Object.assign(profile, {
+        name: '',
+        gender: 'female',
+        avatar: '',
+        avatar_role: visual.role_tags,
+        body_type: visual.body_tags,
+        appearance: visual.appearance_tags,
+        visual_anchor: visual
+      }, p, {
+        avatar_role: visual.role_tags,
+        body_type: visual.body_tags,
+        appearance: visual.appearance_tags,
+        visual_anchor: visual
+      })
     } catch (e) {
       console.error('加载角色资料失败:', e)
     }
@@ -63,12 +90,27 @@ export function useCharacter() {
   }
 
   const createCharacter = async (name, fields = {}) => {
+    const { name: displayName, ...rest } = fields
     const res = await fetch(`${API}/characters/create`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, ...fields })
+      body: JSON.stringify({ name, display_name: displayName, ...rest })
     })
     if (res.ok) characters.value.push(name)
+  }
+
+  const deleteCharacter = async (name) => {
+    const res = await fetch(`${API}/characters/${encodeURIComponent(name)}`, { method: 'DELETE' })
+    if (res.ok) {
+      characters.value = characters.value.filter(c => c !== name)
+      if (activeCharId.value === name) await loadAll()
+    }
+    return res.ok
+  }
+
+  const clearCharacterRecords = async (name) => {
+    const res = await fetch(`${API}/characters/${encodeURIComponent(name)}/records`, { method: 'DELETE' })
+    return res.ok
   }
 
   return {
@@ -80,6 +122,8 @@ export function useCharacter() {
     loadProfile,
     switchCharacter,
     saveProfile,
-    createCharacter
+    createCharacter,
+    deleteCharacter,
+    clearCharacterRecords
   }
 }

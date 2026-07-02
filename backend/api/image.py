@@ -43,9 +43,9 @@ def _save_history(character: str):
     hp.write_text(json.dumps(_histories[character], ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def _add_history(prompt: str, image_url: str, image_path: str):
+def _add_history(prompt: str, image_url: str, image_path: str, character: str | None = None):
     from ..core.characters import get_active
-    char = get_active()
+    char = character or get_active()
     items = _load_history(char)
     items.append({"prompt": prompt, "image_url": image_url, "image_path": image_path})
     _save_history(char)

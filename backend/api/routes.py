@@ -1,28 +1,28 @@
-"""
-REST API 路由
-设置读写、角色管理、手动沉淀
-"""
+"""REST API routes for settings, characters, memory, and chat history."""
 
 import json
 import logging
-from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from ..agents.memory import MemoryAgent
 from ..config import settings
 from ..core.characters import (
-    list_characters, get_active, switch_character,
-    create_character, get_profile, update_profile
+    clear_character_records,
+    create_character,
+    delete_character,
+    get_active,
+    get_profile,
+    list_characters,
+    switch_character,
+    update_profile,
 )
-from ..agents.memory import MemoryAgent
 from ..services.llm import llm_service
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-
-# ========== 设置 ==========
 
 class SettingsUpdate(BaseModel):
     active_character: str = None
@@ -34,66 +34,53 @@ class SettingsUpdate(BaseModel):
 
 @router.get("/settings")
 async def get_settings():
-    """获取全局设置"""
     path = settings.settings_file
     if path.exists():
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
+        return json.loads(path.read_text(encoding="utf-8"))
     return {}
 
 
 @router.put("/settings")
 async def update_settings(updates: SettingsUpdate):
-    """更新全局设置"""
     path = settings.settings_file
-    current = {}
-    if path.exists():
-        with open(path, "r", encoding="utf-8") as f:
-            current = json.load(f)
-
+    current = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
     for key, val in updates.model_dump(exclude_none=True).items():
         if val is not None:
             current[key] = val
-
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(current, f, ensure_ascii=False, indent=2)
-
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(current, ensure_ascii=False, indent=2), encoding="utf-8")
     return current
 
 
-# ========== 角色管理 ==========
-
 class ProfileUpdate(BaseModel):
     name: str = None
+    gender: str = None
     avatar: str = None
     avatar_role: str = None
     body_type: str = None
     appearance: str = None
+    visual_anchor: dict = None
 
 
 class CreateCharacterRequest(BaseModel):
     name: str
+    display_name: str = None
+    gender: str = "female"
     avatar: str = "💕"
     avatar_role: str = ""
     body_type: str = ""
     appearance: str = ""
+    visual_anchor: dict = None
     identity: str = ""
 
 
 @router.get("/characters")
 async def get_characters():
-    """列出所有角色"""
-    chars = list_characters()
-    active = get_active()
-    return {
-        "characters": chars,
-        "active": active
-    }
+    return {"characters": list_characters(), "active": get_active()}
 
 
 @router.post("/characters/switch")
 async def switch_char(name: str):
-    """切换角色"""
     try:
         switch_character(name)
         return {"status": "ok", "active": name}
@@ -103,14 +90,21 @@ async def switch_char(name: str):
 
 @router.post("/characters/create")
 async def create_char(request: CreateCharacterRequest):
-    """创建新角色"""
     try:
+        visual_anchor = request.visual_anchor or {
+            "preset_name": "",
+            "role_tags": request.avatar_role,
+            "body_tags": request.body_type,
+            "appearance_tags": request.appearance,
+        }
         create_character(request.name, {
-            "name": request.name,
+            "name": request.display_name or request.name,
+            "gender": request.gender,
             "avatar": request.avatar,
-            "avatar_role": request.avatar_role,
-            "body_type": request.body_type,
-            "appearance": request.appearance,
+            "avatar_role": visual_anchor.get("role_tags", request.avatar_role),
+            "body_type": visual_anchor.get("body_tags", request.body_type),
+            "appearance": visual_anchor.get("appearance_tags", request.appearance),
+            "visual_anchor": visual_anchor,
             "identity": request.identity,
         })
         return {"status": "ok", "name": request.name}
@@ -118,9 +112,28 @@ async def create_char(request: CreateCharacterRequest):
         raise HTTPException(status_code=400, detail=str(e))
 
 
+@router.delete("/characters/{name}")
+async def delete_char(name: str):
+    try:
+        delete_character(name)
+        return {"status": "ok"}
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.delete("/characters/{name}/records")
+async def clear_char_records(name: str):
+    try:
+        clear_character_records(name)
+        from ..api.ws import chat_history_buffer
+        chat_history_buffer.clear()
+        return {"status": "ok"}
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
 @router.get("/characters/{name}/profile")
 async def get_char_profile(name: str):
-    """获取角色 profile"""
     try:
         return get_profile(name)
     except ValueError as e:
@@ -129,11 +142,9 @@ async def get_char_profile(name: str):
 
 @router.put("/characters/{name}/profile")
 async def update_char_profile(name: str, updates: ProfileUpdate):
-    """更新角色 profile"""
     try:
-        from ..api.ws import momo_agent
         update_profile(name, updates.model_dump(exclude_none=True))
-        # 清除 Agent 缓存，让下次对话使用最新的角色信息
+        from ..api.ws import momo_agent
         momo_agent.reload_system_prompt()
         return {"status": "ok"}
     except ValueError as e:
@@ -142,32 +153,71 @@ async def update_char_profile(name: str, updates: ProfileUpdate):
 
 @router.get("/characters/{name}/identity")
 async def get_char_identity(name: str):
-    """获取角色 identity.md"""
     path = settings.get_character_dir(name) / "identity.md"
     if not path.exists():
         raise HTTPException(status_code=404, detail="identity.md 不存在")
     return {"content": path.read_text(encoding="utf-8")}
 
 
-class IdentityUpdate(BaseModel):
+class TextUpdate(BaseModel):
     content: str
 
 
 @router.put("/characters/{name}/identity")
-async def update_char_identity(name: str, body: IdentityUpdate):
-    """更新角色 identity.md"""
+async def update_char_identity(name: str, body: TextUpdate):
     path = settings.get_character_dir(name) / "identity.md"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(body.content, encoding="utf-8")
     return {"status": "ok"}
 
 
-# ========== 记忆沉淀 ==========
+@router.get("/characters/{name}/chat-history")
+async def get_char_chat_history(name: str, limit: int = 500):
+    try:
+        from ..core.chat_history import read_chat_history
+        return {"messages": read_chat_history(name, limit=limit)}
+    except Exception as e:
+        logger.error("读取聊天记录失败: %s", e)
+        return {"messages": []}
+
+
+class UserProfileUpdate(BaseModel):
+    user_pet_name: str = None
+    identity: str = None
+    communication_style: str = None
+    notes: str = None
+
+
+@router.get("/characters/{name}/user-profile")
+async def get_char_user_profile(name: str):
+    from ..core.memory_v3 import load_user_profile
+    return load_user_profile(name)
+
+
+@router.put("/characters/{name}/user-profile")
+async def update_char_user_profile(name: str, body: UserProfileUpdate):
+    from ..core.memory_v3 import save_user_profile
+    return save_user_profile(name, body.model_dump(exclude_none=True))
+
+
+@router.get("/characters/{name}/long-term")
+async def get_char_long_term(name: str):
+    path = settings.get_memory_dir(name) / "long_term.md"
+    if not path.exists():
+        return {"content": ""}
+    return {"content": path.read_text(encoding="utf-8")}
+
+
+@router.put("/characters/{name}/long-term")
+async def update_char_long_term(name: str, body: TextUpdate):
+    path = settings.get_memory_dir(name) / "long_term.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body.content, encoding="utf-8")
+    return {"status": "ok"}
+
 
 @router.post("/memory/condense")
 async def trigger_condensation(character: str = None, days: int = 1):
-    """手动触发记忆沉淀"""
-    from ..core.characters import get_active
     char = character or get_active()
     agent = MemoryAgent(llm_service)
     result = await agent.condense(char, days)
@@ -176,8 +226,6 @@ async def trigger_condensation(character: str = None, days: int = 1):
 
 @router.get("/memory/daily/{date_str}")
 async def get_daily_memory(date_str: str, character: str = None):
-    """获取指定日期的日记"""
-    from ..core.characters import get_active
     char = character or get_active()
     path = settings.get_memory_dir(char) / f"{date_str}.md"
     if not path.exists():
@@ -185,16 +233,11 @@ async def get_daily_memory(date_str: str, character: str = None):
     return {"date": date_str, "content": path.read_text(encoding="utf-8")}
 
 
-# ========== 应用状态 ==========
-
 @router.get("/state")
 async def get_app_state():
-    """获取当前应用状态"""
-    from ..core.characters import get_active
-    from ..core.state import read_status, read_plans
-    from ..core.context import load_soul, load_long_term
+    from ..core.context import load_long_term, load_soul
+    from ..core.state import read_plans, read_status
     char = get_active()
-
     return {
         "active_character": char,
         "has_soul": bool(load_soul(char)),

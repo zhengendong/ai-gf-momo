@@ -5,6 +5,7 @@
 
 import json
 import logging
+import shutil
 from pathlib import Path
 from typing import Optional
 
@@ -78,6 +79,44 @@ def create_character(name: str, profile: dict):
     (memory_dir / "plans.md").write_text(_default_plans().replace("小桃", name), encoding="utf-8")
 
     logger.info(f"角色 '{name}' 创建完成")
+
+
+def delete_character(name: str):
+    """Delete a character's config, memory, and generated data."""
+    char_dir = settings.get_character_dir(name)
+    if not char_dir.exists():
+        raise ValueError(f"角色 '{name}' 不存在")
+
+    if name == get_active():
+        remaining = [c for c in list_characters() if c != name]
+        if remaining:
+            switch_character(remaining[0])
+
+    for path in [char_dir, settings.get_memory_dir(name), settings.data_dir / name]:
+        if path.exists():
+            shutil.rmtree(path)
+    logger.info("角色 '%s' 已删除", name)
+
+
+def clear_character_records(name: str):
+    """Clear runtime records while keeping profile and identity files."""
+    if not settings.get_character_dir(name).exists():
+        raise ValueError(f"角色 '{name}' 不存在")
+
+    memory_dir = settings.get_memory_dir(name)
+    if memory_dir.exists():
+        for item in list(memory_dir.iterdir()):
+            if item.name in {"chat_history.json", "conversation_summary.md"}:
+                item.unlink(missing_ok=True)
+            elif item.suffix == ".md" and item.stem[:4].isdigit():
+                item.unlink(missing_ok=True)
+
+    images_dir = settings.get_images_dir(name)
+    if images_dir.exists():
+        shutil.rmtree(images_dir)
+
+    memory_dir.mkdir(parents=True, exist_ok=True)
+    logger.info("角色 '%s' 记录已清空", name)
 
 
 def get_profile(name: str) -> dict:

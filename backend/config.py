@@ -94,6 +94,10 @@ class AppConfig(BaseSettings):
     def get_memory_dir(self, name: str) -> Path:
         return self.memory_dir / name
 
+    @property
+    def provider_keys_file(self) -> Path:
+        return self.config_dir / "provider_keys.json"
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 

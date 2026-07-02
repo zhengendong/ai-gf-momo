@@ -266,7 +266,18 @@ async def _async_generate_image(session_id: str, photo_prompt: str):
                 session_id,
                 StreamChunk(type="image", url=url, content=url)
             )
-            _add_history(photo_prompt, url, image_path)
+            try:
+                from ..core.chat_history import append_chat_message
+                append_chat_message(char, {
+                    "role": "assistant",
+                    "type": "image",
+                    "imageUrl": url,
+                    "content": "",
+                    "completed": True,
+                })
+            except Exception as e:
+                logger.warning(f"写入图片聊天记录失败: {e}")
+            _add_history(photo_prompt, url, image_path, character=char)
             await manager.send_chunk(
                 session_id,
                 StreamChunk(type="status_update", content="照片已生成 ✓")

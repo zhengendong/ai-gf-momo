@@ -32,6 +32,10 @@ async def lifespan(app: FastAPI):
     for dir_path in [settings.data_dir, settings.memory_dir]:
         dir_path.mkdir(parents=True, exist_ok=True)
 
+    # 迁移 api_key 从 profile 到 provider 存储，并清理 profile 内的旧 key。
+    from .services.llm_profiles import _migrate_api_keys_to_provider_store
+    _migrate_api_keys_to_provider_store()
+
     logger.info("✅ 应用初始化完成")
 
     yield

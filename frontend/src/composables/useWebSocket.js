@@ -1,33 +1,25 @@
-/**
- * WebSocket 组合式函数
- */
 import { ref, onMounted, onUnmounted } from 'vue'
 
 export function useWebSocket() {
   const isConnected = ref(false)
   const messages = ref([])
   const lastMessage = ref(null)
-  const imageStatus = ref('idle')  // idle | generating | done | error
-  const currentImage = ref(null)    // 当前图片URL
-  const statusUpdate = ref(null)    // 状态栏数据
-  const characterState = ref(null)  // 角色状态 { status: {...}, plans: {...} }
+  const imageStatus = ref('idle')
+  const currentImage = ref(null)
+  const statusUpdate = ref(null)
+  const characterState = ref(null)
 
   let socket = null
   let reconnectTimer = null
   let heartbeatTimer = null
+  let pendingImageId = null
 
-  const generateSessionId = () => {
-    return `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
-  }
-
-  const sessionId = generateSessionId()
+  const sessionId = `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
 
   const connect = () => {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const host = window.location.host
-    const url = `${protocol}//${host}/ws/${sessionId}`
+    const url = `${protocol}//${window.location.host}/ws/${sessionId}`
 
-    console.log(`WebSocket 连接: ${url}`)
     socket = new WebSocket(url)
 
     socket.onopen = () => {
@@ -41,12 +33,13 @@ export function useWebSocket() {
 
         if (data.type === 'text' && data.content) {
           const lastMsg = messages.value[messages.value.length - 1]
-          if (lastMsg && lastMsg.role === 'assistant' && !lastMsg.completed) {
+          if (lastMsg && lastMsg.role === 'assistant' && lastMsg.type !== 'image' && !lastMsg.completed) {
             lastMsg.content += data.content
           } else {
             messages.value.push({
               id: Date.now(),
               role: 'assistant',
+              type: 'text',
               content: data.content,
               timestamp: new Date(),
               completed: false
@@ -55,14 +48,45 @@ export function useWebSocket() {
           lastMessage.value = data
 
         } else if (data.type === 'image' && data.url) {
-          currentImage.value = data.url
+          const imageMessage = {
+            id: pendingImageId || `image_${Date.now()}`,
+            role: 'assistant',
+            type: 'image',
+            imageUrl: data.url,
+            content: data.content || '',
+            timestamp: new Date(),
+            completed: true
+          }
+          const pending = messages.value.find(m => m.id === pendingImageId)
+          if (pending) Object.assign(pending, imageMessage)
+          else messages.value.push(imageMessage)
+          pendingImageId = null
+          currentImage.value = null
           imageStatus.value = 'done'
 
         } else if (data.type === 'image_status') {
           if (data.content === 'generating') {
             imageStatus.value = 'generating'
+            if (!pendingImageId) {
+              pendingImageId = `image_pending_${Date.now()}`
+              messages.value.push({
+                id: pendingImageId,
+                role: 'assistant',
+                type: 'image_pending',
+                content: '正在生成图片...',
+                timestamp: new Date(),
+                completed: false
+              })
+            }
           } else if (data.content === 'error') {
             imageStatus.value = 'error'
+            const pending = messages.value.find(m => m.id === pendingImageId)
+            if (pending) {
+              pending.type = 'image_error'
+              pending.content = data.message || '图片生成失败'
+              pending.completed = true
+            }
+            pendingImageId = null
           } else if (data.content === 'done') {
             if (imageStatus.value !== 'done') imageStatus.value = 'idle'
           }
@@ -72,7 +96,7 @@ export function useWebSocket() {
 
         } else if (data.type === 'done') {
           const lastMsg = messages.value[messages.value.length - 1]
-          if (lastMsg && lastMsg.role === 'assistant') {
+          if (lastMsg && lastMsg.role === 'assistant' && lastMsg.type !== 'image_pending') {
             lastMsg.completed = true
           }
           lastMessage.value = data
@@ -83,9 +107,6 @@ export function useWebSocket() {
           } catch (e) {
             console.error('解析状态数据失败:', e)
           }
-
-        } else if (data.type === 'pong') {
-          // heartbeat
         }
       } catch (error) {
         console.error('解析消息失败:', error)
@@ -111,6 +132,29 @@ export function useWebSocket() {
 
   const refreshMemory = () => {
     sendMessage({ type: 'refresh_memory' })
+  }
+
+  const loadHistory = async (character, limit = 500) => {
+    if (!character) return
+    try {
+      const r = await fetch(`/api/characters/${character}/chat-history?limit=${limit}`)
+      if (!r.ok) return
+      const data = await r.json()
+      messages.value = (data.messages || []).map((msg, index) => ({
+        id: msg.id || `${character}_${index}`,
+        role: msg.role || 'assistant',
+        type: msg.type || 'text',
+        content: msg.content || '',
+        imageUrl: msg.imageUrl || msg.image_url || '',
+        timestamp: msg.timestamp ? new Date(msg.timestamp) : new Date(),
+        completed: msg.completed !== false
+      }))
+      pendingImageId = null
+      imageStatus.value = 'idle'
+      currentImage.value = null
+    } catch (e) {
+      console.error('加载聊天历史失败:', e)
+    }
   }
 
   const startHeartbeat = () => {
@@ -150,7 +194,7 @@ export function useWebSocket() {
   return {
     isConnected, messages, lastMessage,
     imageStatus, currentImage, statusUpdate, characterState,
-    sendMessage, refreshMemory,
+    sendMessage, refreshMemory, loadHistory,
     disconnect, reconnect: connect
   }
 }

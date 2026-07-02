@@ -12,7 +12,18 @@
         <p>你好呀～有什么想和{{ characterName }}说的吗？</p>
       </div>
       <div v-for="msg in messages" :key="msg.id" class="msg" :class="msg.role">
-        <div class="bubble" v-if="msg.content">{{ msg.content }}</div>
+        <div v-if="isImage(msg)" class="image-bubble">
+          <img :src="imageSrc(msg)" :alt="`${characterName}的照片`" />
+          <p v-if="msg.content">{{ msg.content }}</p>
+        </div>
+        <div v-else-if="msg.type === 'image_pending'" class="image-pending">
+          <div class="typing"><span></span><span></span><span></span></div>
+          <p>{{ msg.content || '正在生成图片...' }}</p>
+        </div>
+        <div v-else-if="msg.type === 'image_error'" class="image-error">
+          {{ msg.content || '图片生成失败' }}
+        </div>
+        <div class="bubble" v-else-if="msg.content">{{ msg.content }}</div>
         <div class="time">{{ formatTime(msg.timestamp) }}</div>
       </div>
       <div v-if="isLoading" class="msg assistant">
@@ -62,6 +73,9 @@ const formatTime = (d) => {
   return new Date(d).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
 }
 
+const imageSrc = (msg) => msg.imageUrl || msg.image_url || msg.url || ''
+const isImage = (msg) => msg?.type === 'image' && imageSrc(msg)
+
 watch(() => props.messages.length, async () => {
   await nextTick()
   if (msgList.value) msgList.value.scrollTop = msgList.value.scrollHeight
@@ -95,6 +109,26 @@ watch(() => props.messages.length, async () => {
 }
 .msg.user .bubble { background: linear-gradient(135deg, var(--gradient-start), var(--gradient-end)); color: #fff; border-bottom-right-radius: 4px; }
 .msg.assistant .bubble { background: #fff; color: #4a4a4a; border-bottom-left-radius: 4px; box-shadow: 0 2px 8px rgba(0,0,0,0.06); }
+.image-bubble {
+  max-width: min(75%, 360px); padding: 8px; border-radius: 18px;
+  border-bottom-left-radius: 4px; background: #fff;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+}
+.image-bubble img {
+  display: block; width: 100%; max-height: 520px;
+  object-fit: contain; border-radius: 12px;
+}
+.image-bubble p {
+  margin-top: 6px; font-size: 12px; color: var(--text-light);
+  white-space: pre-wrap;
+}
+.image-pending, .image-error {
+  max-width: 75%; padding: 10px 14px; border-radius: 18px;
+  border-bottom-left-radius: 4px; background: #fff;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+}
+.image-pending p { margin-top: 6px; font-size: 12px; color: #777; }
+.image-error { color: #b91c1c; }
 .time { font-size: 10px; color: #aaa; margin-top: 4px; padding: 0 4px; }
 .typing { display: flex; gap: 4px; padding: 12px 16px; background: #fff; border-radius: 18px; }
 .typing span { width: 7px; height: 7px; background: var(--primary); border-radius: 50%; animation: bounce 1.4s infinite ease-in-out both; }

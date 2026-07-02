@@ -11,6 +11,7 @@
       @switch-character="switchCharacter"
     />
     <div class="main-area">
+      <CharacterDirectory />
       <ChatArea
         :messages="messages"
         :is-loading="isLoading"
@@ -20,17 +21,12 @@
         @send="onSendMessage"
       />
       <div class="right-side">
-        <ImagePanel
-          :status="imageStatus"
-          :image-url="currentImage"
-          :status-text="statusUpdate"
-          :character-name="profile.name"
-          :character-avatar="profile.avatar"
-          :avatar-role="profile.avatar_role"
-          :body-type="profile.body_type"
-          :appearance="profile.appearance"
-        />
         <StatePanel :character-state="characterState" />
+        <ImageGallery
+          :character-name="profile.name"
+          :active-char-id="activeCharId"
+          :image-status="imageStatus"
+        />
       </div>
     </div>
     <SettingsPanel />
@@ -42,21 +38,23 @@ import { ref, watch, onMounted } from 'vue'
 import { useWebSocket } from './composables/useWebSocket'
 import { useCharacter } from './composables/useCharacter.js'
 import ChatArea from './components/ChatArea.vue'
-import ImagePanel from './components/ImagePanel.vue'
+import ImageGallery from './components/ImageGallery.vue'
+import CharacterDirectory from './components/CharacterDirectory.vue'
 import StatusBar from './components/StatusBar.vue'
 import SettingsPanel from './components/SettingsPanel.vue'
 import StatePanel from './components/StatePanel.vue'
 
 const {
   isConnected, messages, lastMessage,
-  imageStatus, currentImage, statusUpdate, characterState,
-  sendMessage, refreshMemory,
+  imageStatus, characterState,
+  sendMessage, refreshMemory, loadHistory,
 } = useWebSocket()
 
 const { profile, characters, activeCharId, loadAll, switchCharacter } = useCharacter()
 
-onMounted(() => {
-  loadAll()
+onMounted(async () => {
+  await loadAll()
+  await loadHistory(activeCharId.value)
 })
 
 watch(() => profile.name, (name) => {
@@ -88,7 +86,7 @@ const onSendMessage = (text) => {
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--bg-lighter); }
-.app { height: 100vh; height: 100dvh; display: flex; flex-direction: column; max-width: 1100px; margin: 0 auto; }
+.app { height: 100vh; height: 100dvh; display: flex; flex-direction: column; max-width: 1320px; margin: 0 auto; }
 .main-area { flex: 1; display: flex; overflow: hidden; min-height: 0; }
 .right-side {
   width: 320px; display: flex; flex-direction: column;
