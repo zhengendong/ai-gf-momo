@@ -17,6 +17,7 @@
           <label>压缩阈值</label>
           <input v-model.number="settings.context.compress_at" type="number" step="0.1" min="0.5" max="0.95" />
         </div>
+        <button @click="saveGeneral" class="save-btn">保存设置</button>
       </div>
 
       <div v-if="activeTab === '角色'" class="tab-content">
@@ -115,6 +116,7 @@
           <div class="form-field"><label>宽度</label><input v-model.number="settings.comfyui.width" type="number" /></div>
           <div class="form-field"><label>高度</label><input v-model.number="settings.comfyui.height" type="number" /></div>
         </div>
+        <button @click="saveComfyui" class="save-btn">保存设置</button>
       </div>
 
       <div v-if="activeTab === '记忆'" class="tab-content">
@@ -199,11 +201,6 @@
           </div>
         </div>
         <button @click="newProfile" class="save-btn">+ 新增模型</button>
-      </div>
-
-      <div class="actions">
-        <button @click="saveAll" class="save-btn">保存所有设置</button>
-        <span v-if="saved" class="saved">✓ 已保存</span>
       </div>
     </div>
   </div>
@@ -420,11 +417,20 @@ const saveLongTerm = async () => {
   showSaved()
 }
 
-const saveAll = async () => {
+const saveGeneral = async () => {
   await fetch(`${API}/settings`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(settings)
+    body: JSON.stringify({ context: settings.context })
+  })
+  showSaved()
+}
+
+const saveComfyui = async () => {
+  await fetch(`${API}/settings`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ comfyui: settings.comfyui })
   })
   showSaved()
 }
@@ -499,14 +505,6 @@ const triggerCondense = () => {
 .form-field textarea { resize: vertical; min-height: 38px; }
 .form-card { background: var(--bg-lighter); border-radius: var(--radius-sm); padding: 12px; }
 .form-row { display: flex; gap: 12px; }
-.actions {
-  margin-top: 12px;
-  padding-top: 12px;
-  border-top: 1px solid var(--border-light);
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
 .save-btn {
   background: linear-gradient(135deg, var(--gradient-start), var(--gradient-end));
   color: #fff;
