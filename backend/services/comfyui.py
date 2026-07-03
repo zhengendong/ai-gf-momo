@@ -247,7 +247,10 @@ class ComfyUIService:
         workflow_name: str = None,
         seed: int = -1,
         width: int = None,
-        height: int = None
+        height: int = None,
+        character: str = None,
+        filename_prefix: str = None,
+        inject_character_tags: bool = True,
     ) -> dict:
         """
         从工作流 JSON 模板构建 ComfyUI prompt
@@ -281,20 +284,21 @@ class ComfyUIService:
         with open(wf_path, "r", encoding="utf-8") as f:
             workflow_data = json.load(f)
 
-        # 自动拼接角色默认标签到 prompt 前面（固化角色特征，LLM 不需要自己编）
-        char = get_active()
-        try:
-            profile = load_character_profile(char)
-            char_tags = f"{profile.get('avatar_role', '')}, {profile.get('body_type', '')}, {profile.get('appearance', '')}"
-            char_tags = char_tags.strip(", ")
-            if char_tags:
-                prompt = f"{char_tags}, {prompt}"
-                prompt = self._normalize_prompt(prompt)
-                logger.info(f"已拼接角色标签并去重: {char_tags[:80]}...")
-            else:
-                logger.warning(f"角色标签为空（profile 字段缺失），使用原始 prompt")
-        except Exception as e:
-            logger.warning(f"加载角色标签失败，使用原始 prompt: {e}")
+        # 旧 REST 入口可选择自动拼接角色标签；新 ImageTool 已经提前构建最终 prompt。
+        char = character or get_active()
+        if inject_character_tags:
+            try:
+                profile = load_character_profile(char)
+                char_tags = f"{profile.get('avatar_role', '')}, {profile.get('body_type', '')}, {profile.get('appearance', '')}"
+                char_tags = char_tags.strip(", ")
+                if char_tags:
+                    prompt = f"{char_tags}, {prompt}"
+                    prompt = self._normalize_prompt(prompt)
+                    logger.info(f"已拼接角色标签并去重: {char_tags[:80]}...")
+                else:
+                    logger.warning(f"角色标签为空（profile 字段缺失），使用原始 prompt")
+            except Exception as e:
+                logger.warning(f"加载角色标签失败，使用原始 prompt: {e}")
 
         # 构建节点链接映射
         links_map = {}
@@ -360,7 +364,7 @@ class ComfyUIService:
                     node_data["inputs"]["height"] = height
 
             elif class_type == "SaveImage":
-                node_data["inputs"]["filename_prefix"] = char
+                node_data["inputs"]["filename_prefix"] = filename_prefix or char
 
             elif class_type == "CLIPTextEncode":
                 title = node.get("title", "")

@@ -7,7 +7,7 @@
       :character-avatar="profile.avatar"
       :characters="characters"
       :active-char-id="activeCharId"
-      @refresh-memory="refreshMemory"
+      @refresh-memory="onRefreshMemory"
       @switch-character="switchCharacter"
     />
     <div class="main-area">
@@ -47,7 +47,7 @@ import StatePanel from './components/StatePanel.vue'
 const {
   isConnected, messages, lastMessage,
   imageStatus, characterState,
-  sendMessage, refreshMemory, loadHistory,
+  sendMessage, refreshMemory, syncCharacter, loadHistory,
 } = useWebSocket()
 
 const { profile, characters, activeCharId, loadAll, switchCharacter } = useCharacter()
@@ -55,10 +55,15 @@ const { profile, characters, activeCharId, loadAll, switchCharacter } = useChara
 onMounted(async () => {
   await loadAll()
   await loadHistory(activeCharId.value)
+  syncCharacter(activeCharId.value)
 })
 
 watch(() => profile.name, (name) => {
   if (name) document.title = `${name} ${profile.avatar}`
+})
+
+watch(isConnected, (connected) => {
+  if (connected && activeCharId.value) syncCharacter(activeCharId.value)
 })
 
 const isLoading = ref(false)
@@ -73,13 +78,18 @@ watch(messages, () => {
 }, { deep: true })
 
 const onSendMessage = (text) => {
+  const characterId = activeCharId.value
   messages.value.push({
     id: Date.now(),
     role: 'user',
     content: text,
     timestamp: new Date()
   })
-  sendMessage({ type: 'text', content: text })
+  sendMessage({ type: 'text', character_id: characterId, content: text })
+}
+
+const onRefreshMemory = () => {
+  refreshMemory(activeCharId.value)
 }
 </script>
 

@@ -190,6 +190,9 @@ def get_clothing_tags(character: str = None) -> str:
     try:
         snapshot = read_state_snapshot(char)
         tags = snapshot.get("outfit", {}).get("tags", [])
+        if not tags:
+            status_md = read_status(char)
+            tags = parse_clothing_status(status_md)
     except Exception as e:
         logger.warning(f"读取 state_snapshot 失败，回退 status.md: {e}")
         status_md = read_status(char)

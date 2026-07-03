@@ -149,9 +149,9 @@ async def get_generation_status(task_id: str):
 
 
 @router.get("/history")
-async def get_generation_history(limit: int = 10):
+async def get_generation_history(limit: int = 10, character: str = None):
     from ..core.characters import get_active
-    items = _load_history(get_active())
+    items = _load_history(character or get_active())
     return {
         "total": len(items),
         "items": items[-limit:][::-1]

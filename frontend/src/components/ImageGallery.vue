@@ -58,7 +58,7 @@ const totalLabel = computed(() => images.value.length ? `${images.value.length} 
 
 async function openGallery() {
   open.value = true
-  await fetchHistory(100)
+  await fetchHistory(100, props.activeCharId)
 }
 
 function closeGallery() {
@@ -68,14 +68,14 @@ function closeGallery() {
 
 watch(() => props.activeCharId, async () => {
   selected.value = null
-  if (open.value) await fetchHistory(100)
+  if (open.value) await fetchHistory(100, props.activeCharId)
 })
 
 watch(() => props.imageStatus, async (status) => {
-  if (status === 'done') await fetchHistory(100)
+  if (status === 'done') await fetchHistory(100, props.activeCharId)
 })
 
-fetchHistory(20)
+fetchHistory(20, props.activeCharId)
 </script>
 
 <style scoped>

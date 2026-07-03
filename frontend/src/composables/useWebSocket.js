@@ -130,8 +130,12 @@ export function useWebSocket() {
     }
   }
 
-  const refreshMemory = () => {
-    sendMessage({ type: 'refresh_memory' })
+  const refreshMemory = (characterId = '') => {
+    sendMessage({ type: 'refresh_memory', character_id: characterId })
+  }
+
+  const syncCharacter = (characterId = '') => {
+    sendMessage({ type: 'sync_character', character_id: characterId })
   }
 
   const loadHistory = async (character, limit = 500) => {
@@ -194,7 +198,7 @@ export function useWebSocket() {
   return {
     isConnected, messages, lastMessage,
     imageStatus, currentImage, statusUpdate, characterState,
-    sendMessage, refreshMemory, loadHistory,
+    sendMessage, refreshMemory, syncCharacter, loadHistory,
     disconnect, reconnect: connect
   }
 }

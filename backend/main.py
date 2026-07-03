@@ -29,8 +29,10 @@ async def lifespan(app: FastAPI):
     logger.info("🚀 启动 AI 女友应用...")
 
     # 确保数据目录存在
-    for dir_path in [settings.data_dir, settings.memory_dir]:
+    for dir_path in [settings.data_dir, settings.characters_dir]:
         dir_path.mkdir(parents=True, exist_ok=True)
+    from .core.characters import migrate_all_character_assets
+    migrate_all_character_assets()
 
     # 迁移 api_key 从 profile 到 provider 存储，并清理 profile 内的旧 key。
     from .services.llm_profiles import _migrate_api_keys_to_provider_store
@@ -82,8 +84,8 @@ from .api import ws
 app.include_router(ws.router, tags=["WebSocket"])
 
 # 静态文件服务 — 生成的图片
-settings.data_dir.mkdir(parents=True, exist_ok=True)
-app.mount("/static", StaticFiles(directory=str(settings.data_dir)), name="static")
+settings.static_dir.mkdir(parents=True, exist_ok=True)
+app.mount("/static", StaticFiles(directory=str(settings.static_dir)), name="static")
 
 # 静态文件服务（前端 build）
 frontend_dir = Path(__file__).parent.parent / "frontend" / "dist"

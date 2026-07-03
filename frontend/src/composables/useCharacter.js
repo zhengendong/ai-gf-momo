@@ -109,7 +109,7 @@ export function useCharacter() {
   }
 
   const clearCharacterRecords = async (name) => {
-    const res = await fetch(`${API}/characters/${encodeURIComponent(name)}/records`, { method: 'DELETE' })
+    const res = await fetch(`${API}/characters/${encodeURIComponent(name)}/memory/reset`, { method: 'POST' })
     return res.ok
   }
 

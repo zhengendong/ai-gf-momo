@@ -123,8 +123,8 @@
 
       <div v-if="activeTab === '记忆'" class="tab-content">
         <div class="form-field">
-          <label>沉淀时间</label>
-          <input v-model="settings.memory.condensation_time" />
+          <label>每几轮沉淀</label>
+          <input v-model.number="settings.memory.turns_per_condense" type="number" min="0" />
         </div>
         <div class="form-row">
           <div class="form-field"><label>沉淀天数</label><input v-model.number="settings.memory.condensation_days" type="number" /></div>
@@ -248,7 +248,14 @@ const settings = reactive({
     width: 1024,
     height: 1024
   },
-  memory: { condensation_time: '02:00', condensation_days: 1, retention_days: 30 },
+  memory: {
+    condensation_days: 1,
+    retention_days: 30,
+    turns_per_condense: 15,
+    vector_recall_enabled: true,
+    vector_top_k: 5,
+    vector_max_distance: 0.55
+  },
   heartbeat: { interval_minutes: 30, quiet_start: '23:00', quiet_end: '08:00' },
 })
 

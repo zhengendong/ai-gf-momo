@@ -4,6 +4,7 @@
 """
 
 import logging
+import json
 from pathlib import Path
 from typing import Optional
 
@@ -12,19 +13,31 @@ from ..utils.helpers import read_markdown, write_markdown
 
 logger = logging.getLogger(__name__)
 
-# 白名单：status.md 里允许的顶级 ## section
-ALLOWED_STATUS_SECTIONS = {"穿着", "场景细节", "小桃的心情状态"}
+def _character_name(character: str) -> str:
+    from .context import get_character_name
+    return get_character_name(character)
 
-# 别名映射：LLM 可能传的非标准 key → 标准 section（None = 丢弃）
-SECTION_ALIASES = {
-    "心情状态": "小桃的心情状态",
-    "表情": "小桃的心情状态",
-    "房间": "场景细节",
-    "地点": "场景细节",
-    "裙子": "穿着",
-    "姿势/动作": None,
-    "外貌": None,
-}
+
+def _mood_section(character: str) -> str:
+    return f"{_character_name(character)}的心情状态"
+
+
+def _allowed_sections(character: str) -> set[str]:
+    return {"穿着", "场景细节", _mood_section(character), f"{character}的心情状态", "小桃的心情状态"}
+
+
+def _section_aliases(character: str) -> dict:
+    mood = _mood_section(character)
+    return {
+        "心情状态": mood,
+        "表情": mood,
+        "小桃的心情状态": mood,
+        "房间": "场景细节",
+        "地点": "场景细节",
+        "裙子": "穿着",
+        "姿势/动作": None,
+        "外貌": None,
+    }
 
 
 def _dict_to_bullets(d: dict) -> str:
@@ -59,12 +72,29 @@ def get_plans_path(character: str) -> Path:
     return settings.get_memory_dir(character) / "plans.md"
 
 
+def get_state_snapshot_path(character: str) -> Path:
+    """获取角色结构化状态快照路径。"""
+    return settings.get_memory_dir(character) / "state_snapshot.json"
+
+
+def read_state_snapshot(character: str) -> dict:
+    """读取角色结构化状态快照；不存在时返回空结构。"""
+    path = get_state_snapshot_path(character)
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception as e:
+        logger.warning(f"读取 state_snapshot 失败: {character}: {e}")
+        return {}
+
+
 def read_status(character: str) -> str:
     """读取角色的当前状态"""
     path = get_status_path(character)
     if not path.exists():
         path.parent.mkdir(parents=True, exist_ok=True)
-        default = _default_status()
+        default = _default_status(character)
         write_markdown(path, default)
         return default
     return read_markdown(path)
@@ -75,7 +105,7 @@ def read_plans(character: str) -> str:
     path = get_plans_path(character)
     if not path.exists():
         path.parent.mkdir(parents=True, exist_ok=True)
-        default = _default_plans()
+        default = _default_plans(character)
         write_markdown(path, default)
         return default
     return read_markdown(path)
@@ -116,7 +146,7 @@ def apply_state_updates(character: str, updates: dict):
         elif isinstance(status_val, dict):
             # 深度合并模式：读当前 → 合并 → 写回
             current = read_status(character)
-            merged = _deep_merge_markdown(current, status_val)
+            merged = _deep_merge_markdown(character, current, status_val)
             write_status(character, merged)
 
     if "plans" in updates:
@@ -125,11 +155,11 @@ def apply_state_updates(character: str, updates: dict):
             write_plans(character, plans_val)
         elif isinstance(plans_val, dict):
             current = read_plans(character)
-            merged = _deep_merge_markdown(current, plans_val)
+            merged = _deep_merge_markdown(character, current, plans_val)
             write_plans(character, merged)
 
 
-def _deep_merge_markdown(current_text: str, updates: dict) -> str:
+def _deep_merge_markdown(character: str, current_text: str, updates: dict) -> str:
     """
     将字典更新合并到 Markdown 文本。
     - 非白名单 key 通过别名映射路由，无匹配则跳过并记 warning
@@ -137,12 +167,14 @@ def _deep_merge_markdown(current_text: str, updates: dict) -> str:
     - str 值直接作为 section 内容
     """
     result = current_text
+    aliases = _section_aliases(character)
+    allowed = _allowed_sections(character)
     for section, content in updates.items():
-        canonical = SECTION_ALIASES.get(section, section)
+        canonical = aliases.get(section, section)
         if canonical is None:
             logger.warning(f"状态更新丢弃非白名单 key: {section!r}")
             continue
-        if canonical not in ALLOWED_STATUS_SECTIONS:
+        if canonical not in allowed:
             logger.warning(f"状态更新跳过未识别 key: {section!r}")
             continue
 
@@ -174,9 +206,10 @@ def _deep_merge_markdown(current_text: str, updates: dict) -> str:
     return result
 
 
-def _default_status() -> str:
+def _default_status(character: str = "momo") -> str:
     """默认状态"""
-    return """# 小桃的状态
+    char_name = _character_name(character)
+    return f"""# {char_name}的状态
 
 ## 穿着
 - 上衣：白色衬衫
@@ -191,18 +224,19 @@ def _default_status() -> str:
 - 光线：暖色灯光
 - 时间段：傍晚
 
-## 小桃的心情状态
-- 主人回来了好开心～
+## {char_name}的心情状态
+- 等待开始新的对话
 """
 
 
-def _default_plans() -> str:
+def _default_plans(character: str = "momo") -> str:
     """默认计划"""
-    return """# 小桃的计划
+    char_name = _character_name(character)
+    return f"""# {char_name}的计划
 
 ## 当前目标
-- 陪主人聊天
+- 陪用户聊天
 
 ## 想做的事
-- 让主人看看小桃今天乖不乖
+- 了解用户今天想聊什么
 """

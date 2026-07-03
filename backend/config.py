@@ -67,18 +67,34 @@ class AppConfig(BaseSettings):
 
     @property
     def characters_dir(self) -> Path:
+        return self.base_dir / "characters"
+
+    @property
+    def legacy_characters_dir(self) -> Path:
         return self.config_dir / "characters"
 
     @property
     def memory_dir(self) -> Path:
+        return self.base_dir / "characters"
+
+    @property
+    def legacy_memory_dir(self) -> Path:
         return self.base_dir / "memory"
 
     @property
     def data_dir(self) -> Path:
         return self.base_dir / "data"
 
+    @property
+    def legacy_data_dir(self) -> Path:
+        return self.base_dir / "data"
+
+    @property
+    def static_dir(self) -> Path:
+        return self.characters_dir
+
     def get_images_dir(self, name: str) -> Path:
-        return self.data_dir / name / "images"
+        return self.get_character_dir(name) / "images"
 
     @property
     def settings_file(self) -> Path:
@@ -92,7 +108,10 @@ class AppConfig(BaseSettings):
         return self.characters_dir / name
 
     def get_memory_dir(self, name: str) -> Path:
-        return self.memory_dir / name
+        return self.get_character_dir(name) / "memory"
+
+    def get_vector_dir(self, name: str) -> Path:
+        return self.get_character_dir(name) / "vector" / "chroma_db"
 
     @property
     def provider_keys_file(self) -> Path:

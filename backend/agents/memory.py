@@ -4,10 +4,16 @@ Memory Agent — 记忆沉淀
 """
 
 import logging
+import re
 from pathlib import Path
 from datetime import date, timedelta
 
 from ..config import settings
+from ..core.context import (
+    get_character_name,
+    load_identity,
+    render_user_profile,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +36,9 @@ class MemoryAgent:
             {"soul": "更新后的 soul.md 内容", "long_term": "更新后的 long_term.md 内容"}
         """
         memory_dir = settings.get_memory_dir(character)
+        char_name = get_character_name(character)
+        identity = load_identity(character)
+        user_profile = render_user_profile(character)
 
         # 1. 读取 daily memory
         daily_texts = []
@@ -37,7 +46,8 @@ class MemoryAgent:
             d = date.today() - timedelta(days=i + 1)
             path = memory_dir / f"{d.isoformat()}.md"
             if path.exists():
-                daily_texts.append(f"## {d.isoformat()}\n{path.read_text(encoding='utf-8')}")
+                raw_daily = path.read_text(encoding="utf-8")
+                daily_texts.append(f"## {d.isoformat()}\n{self._filter_daily_pollution(character, raw_daily)}")
 
         if not daily_texts:
             logger.info(f"角色 {character} 没有需要沉淀的日记")
@@ -52,11 +62,17 @@ class MemoryAgent:
         current_long = long_term_path.read_text(encoding="utf-8") if long_term_path.exists() else ""
 
         # 3. 调用 LLM 分析
-        system = """你是记忆沉淀助手。你的任务是从对话日记中提炼精华，更新灵魂(soul)和长期记忆(long_term)。
+        system = f"""你是记忆沉淀助手。你的任务是从当前角色的对话日记中提炼精华，更新 soul.md 和 long_term.md。
+
+当前角色是：{char_name}
 
 规则：
-- soul.md：只记录感情观、自我认知、核心欲望、底线变化。是"她变成了什么样的人"，不是流水账。必须短。过时的内容替换而非追加。
-- long_term.md：记录主人偏好、纪念日、重要事件。同类合并、无意义删除。必须短。
+- identity.md 是固定身份，只能作为判断依据，绝不能改写，也不能被日记覆盖。
+- user.json 只描述用户，不描述角色身份。
+- 如果日记中出现“当前角色自称为另一个名字/另一个角色”的内容，把它视为污染，不要沉淀。
+- soul.md：只记录当前角色的自我认知、情感倾向、底线、执念等慢变化人格。不要写流水账，不要写用户偏好。
+- long_term.md：只记录用户偏好、纪念日、重要事件、关系约定、稳定事实。不要写“当前角色是谁”。
+- 输出必须短，合并同类项，删除无意义或污染内容。
 
 输出 JSON：
 {
@@ -64,7 +80,13 @@ class MemoryAgent:
   "long_term": "更新后的 long_term.md 完整内容"
 }"""
 
-        user = f"""## 对话日记
+        user = f"""## 当前角色 identity.md（固定身份，只读）
+{identity or "（空）"}
+
+## 当前用户 user.json（只描述用户）
+{user_profile or "（空）"}
+
+## 对话日记（原料，可能含污染）
 {daily_content}
 
 ## 当前 soul.md
@@ -86,6 +108,7 @@ class MemoryAgent:
                 text = "\n".join(lines[1:-1]) if len(lines) > 2 else text
 
             data = json.loads(text)
+            data = self._sanitize_output(character, char_name, data)
 
             # 4. 写回文件
             if "soul" in data and data["soul"]:
@@ -101,3 +124,54 @@ class MemoryAgent:
         except Exception as e:
             logger.error(f"记忆沉淀失败: {e}")
             return {}
+
+    def _sanitize_output(self, character: str, char_name: str, data: dict) -> dict:
+        """Drop obvious identity-conflict lines before writing memory files."""
+        known_names = set()
+        chars_dir = settings.characters_dir
+        if chars_dir.exists():
+            for item in chars_dir.iterdir():
+                if not item.is_dir():
+                    continue
+                try:
+                    known_names.add(get_character_name(item.name))
+                except Exception:
+                    known_names.add(item.name)
+        known_names.discard(char_name)
+        known_names.discard(character)
+
+        cleaned = dict(data or {})
+        for key in ("soul", "long_term"):
+            text = str(cleaned.get(key) or "")
+            if not text:
+                continue
+            lines = []
+            for line in text.splitlines():
+                if self._is_identity_conflict(line, known_names):
+                    logger.warning("沉淀输出疑似身份污染，已丢弃: %s", line)
+                    continue
+                lines.append(line)
+            cleaned[key] = "\n".join(lines).strip() + "\n"
+        return cleaned
+
+    def _is_identity_conflict(self, line: str, other_names: set[str]) -> bool:
+        if not other_names:
+            return False
+        text = line.strip()
+        if not text:
+            return False
+        identity_markers = ("我是", "我叫", "你是", "她是", "角色是", "名字是")
+        if not any(marker in text for marker in identity_markers):
+            return False
+        return any(name and name in text for name in other_names)
+
+    def _filter_daily_pollution(self, character: str, text: str) -> str:
+        """Remove obvious identity-conflict lines from daily logs before condensation."""
+        from ..core.memory_v3 import is_identity_conflict_memory
+        kept = []
+        for line in (text or "").splitlines():
+            if is_identity_conflict_memory(character, line):
+                logger.warning("沉淀输入疑似身份污染，已过滤: %s", line)
+                continue
+            kept.append(line)
+        return "\n".join(kept)

@@ -15,6 +15,8 @@ from ..core.characters import (
     get_active,
     get_profile,
     list_characters,
+    migrate_character_assets,
+    reset_character_memory,
     switch_character,
     update_profile,
 )
@@ -125,7 +127,9 @@ async def delete_char(name: str):
 async def clear_char_records(name: str):
     try:
         clear_character_records(name)
+        from ..api.image import _histories
         from ..api.ws import chat_history_buffer
+        _histories.pop(name, None)
         chat_history_buffer.clear()
         return {"status": "ok"}
     except ValueError as e:
@@ -145,7 +149,7 @@ async def update_char_profile(name: str, updates: ProfileUpdate):
     try:
         update_profile(name, updates.model_dump(exclude_none=True))
         from ..api.ws import momo_agent
-        momo_agent.reload_system_prompt()
+        momo_agent.reload_system_prompt(name)
         return {"status": "ok"}
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -153,6 +157,7 @@ async def update_char_profile(name: str, updates: ProfileUpdate):
 
 @router.get("/characters/{name}/identity")
 async def get_char_identity(name: str):
+    migrate_character_assets(name)
     path = settings.get_character_dir(name) / "identity.md"
     if not path.exists():
         raise HTTPException(status_code=404, detail="identity.md 不存在")
@@ -165,6 +170,7 @@ class TextUpdate(BaseModel):
 
 @router.put("/characters/{name}/identity")
 async def update_char_identity(name: str, body: TextUpdate):
+    migrate_character_assets(name)
     path = settings.get_character_dir(name) / "identity.md"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(body.content, encoding="utf-8")
@@ -202,6 +208,7 @@ async def update_char_user_profile(name: str, body: UserProfileUpdate):
 
 @router.get("/characters/{name}/long-term")
 async def get_char_long_term(name: str):
+    migrate_character_assets(name)
     path = settings.get_memory_dir(name) / "long_term.md"
     if not path.exists():
         return {"content": ""}
@@ -210,6 +217,7 @@ async def get_char_long_term(name: str):
 
 @router.put("/characters/{name}/long-term")
 async def update_char_long_term(name: str, body: TextUpdate):
+    migrate_character_assets(name)
     path = settings.get_memory_dir(name) / "long_term.md"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(body.content, encoding="utf-8")
@@ -221,16 +229,43 @@ async def trigger_condensation(character: str = None, days: int = 1):
     char = character or get_active()
     agent = MemoryAgent(llm_service)
     result = await agent.condense(char, days)
+    from ..core.memory_policy import reset_condense_counter
+    reset_condense_counter(char, trigger="manual_api")
     return {"status": "ok", "character": char, "result": result}
+
+
+@router.get("/memory/status")
+async def get_memory_status(character: str = None):
+    char = character or get_active()
+    from ..core.memory_policy import load_runtime_state, memory_settings
+    return {
+        "character": char,
+        "settings": memory_settings(),
+        "runtime": load_runtime_state(char),
+    }
 
 
 @router.get("/memory/daily/{date_str}")
 async def get_daily_memory(date_str: str, character: str = None):
     char = character or get_active()
+    migrate_character_assets(char)
     path = settings.get_memory_dir(char) / f"{date_str}.md"
     if not path.exists():
         raise HTTPException(status_code=404, detail="该日期无日记")
     return {"date": date_str, "content": path.read_text(encoding="utf-8")}
+
+
+@router.post("/characters/{name}/memory/reset")
+async def reset_char_memory(name: str):
+    try:
+        reset_character_memory(name)
+        from ..api.image import _histories
+        from ..api.ws import chat_history_buffer
+        _histories.pop(name, None)
+        chat_history_buffer.clear()
+        return {"status": "ok", "character": name}
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
 
 
 @router.get("/state")

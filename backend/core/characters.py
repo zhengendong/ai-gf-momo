@@ -16,10 +16,11 @@ logger = logging.getLogger(__name__)
 
 def list_characters() -> list[str]:
     """列出所有角色"""
+    migrate_all_character_assets()
     chars_dir = settings.characters_dir
     if not chars_dir.exists():
         return []
-    return [d.name for d in chars_dir.iterdir() if d.is_dir()]
+    return sorted(d.name for d in chars_dir.iterdir() if d.is_dir())
 
 
 def get_active() -> str:
@@ -30,6 +31,7 @@ def get_active() -> str:
 
 def switch_character(name: str):
     """切换激活角色"""
+    migrate_character_assets(name)
     chars_dir = settings.characters_dir
     char_dir = chars_dir / name
     if not char_dir.exists():
@@ -67,22 +69,48 @@ def create_character(name: str, profile: dict):
         identity = f"# {name}\n\n## 身份\n\n待编辑...\n"
     (char_dir / "identity.md").write_text(identity, encoding="utf-8")
 
-    # 初始化记忆空间
-    memory_dir = settings.memory_dir / name
+    # 初始化角色资产空间
+    memory_dir = settings.get_memory_dir(name)
     memory_dir.mkdir(parents=True, exist_ok=True)
+    settings.get_images_dir(name).mkdir(parents=True, exist_ok=True)
+    settings.get_vector_dir(name).parent.mkdir(parents=True, exist_ok=True)
 
     # 初始化记忆文件
     from .state import _default_status, _default_plans
-    (memory_dir / "soul.md").write_text(f"# {name}的灵魂\n\n## 核心\n\n待编辑...\n", encoding="utf-8")
-    (memory_dir / "long_term.md").write_text(f"# {name}的长期记忆\n\n（随对话自然生长）\n", encoding="utf-8")
-    (memory_dir / "status.md").write_text(_default_status().replace("小桃", name), encoding="utf-8")
-    (memory_dir / "plans.md").write_text(_default_plans().replace("小桃", name), encoding="utf-8")
+    from .memory_v3 import default_user_profile
+    display_name = default_profile.get("name") or name
+    (memory_dir / "user.json").write_text(
+        json.dumps(default_user_profile(), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    (memory_dir / "soul.md").write_text(_default_soul(display_name), encoding="utf-8")
+    (memory_dir / "long_term.md").write_text(f"# {display_name}的长期记忆\n\n（随对话自然生长）\n", encoding="utf-8")
+    (memory_dir / "status.md").write_text(_default_status(name), encoding="utf-8")
+    (memory_dir / "plans.md").write_text(_default_plans(name), encoding="utf-8")
 
     logger.info(f"角色 '{name}' 创建完成")
 
 
+def _default_soul(display_name: str) -> str:
+    return f"""# {display_name}的灵魂
+
+## 自我认知
+- （随长期互动慢慢形成）
+
+## 情感倾向
+- （随长期互动慢慢形成）
+
+## 底线
+- （随长期互动慢慢形成）
+
+## 执念
+- （随长期互动慢慢形成）
+"""
+
+
 def delete_character(name: str):
     """Delete a character's config, memory, and generated data."""
+    migrate_character_assets(name)
     char_dir = settings.get_character_dir(name)
     if not char_dir.exists():
         raise ValueError(f"角色 '{name}' 不存在")
@@ -92,7 +120,13 @@ def delete_character(name: str):
         if remaining:
             switch_character(remaining[0])
 
-    for path in [char_dir, settings.get_memory_dir(name), settings.data_dir / name]:
+    if char_dir.exists():
+        shutil.rmtree(char_dir)
+    for path in [
+        settings.legacy_characters_dir / name,
+        settings.legacy_memory_dir / name,
+        settings.legacy_data_dir / name,
+    ]:
         if path.exists():
             shutil.rmtree(path)
     logger.info("角色 '%s' 已删除", name)
@@ -100,27 +134,57 @@ def delete_character(name: str):
 
 def clear_character_records(name: str):
     """Clear runtime records while keeping profile and identity files."""
+    migrate_character_assets(name)
     if not settings.get_character_dir(name).exists():
         raise ValueError(f"角色 '{name}' 不存在")
 
-    memory_dir = settings.get_memory_dir(name)
-    if memory_dir.exists():
-        for item in list(memory_dir.iterdir()):
-            if item.name in {"chat_history.json", "conversation_summary.md"}:
-                item.unlink(missing_ok=True)
-            elif item.suffix == ".md" and item.stem[:4].isdigit():
-                item.unlink(missing_ok=True)
+    reset_character_memory(name)
 
+    logger.info("角色 '%s' 记录已清空", name)
+
+
+def reset_character_memory(name: str):
+    """Reset dynamic memory, chat records, generated images, and vector data."""
+    char_dir = settings.get_character_dir(name)
+    if not char_dir.exists():
+        raise ValueError(f"角色 '{name}' 不存在")
+
+    memory_dir = settings.get_memory_dir(name)
     images_dir = settings.get_images_dir(name)
+    vector_dir = settings.get_vector_dir(name)
+
+    if memory_dir.exists():
+        shutil.rmtree(memory_dir)
     if images_dir.exists():
         shutil.rmtree(images_dir)
+    vector_root = vector_dir.parent
+    if vector_root.exists():
+        shutil.rmtree(vector_root)
 
     memory_dir.mkdir(parents=True, exist_ok=True)
-    logger.info("角色 '%s' 记录已清空", name)
+    images_dir.mkdir(parents=True, exist_ok=True)
+    vector_root.mkdir(parents=True, exist_ok=True)
+
+    from .memory_v3 import default_user_profile
+    from .state import _default_plans, _default_status
+
+    display_name = get_profile(name).get("name") or name
+    (memory_dir / "user.json").write_text(
+        json.dumps(default_user_profile(), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    (memory_dir / "soul.md").write_text(_default_soul(display_name), encoding="utf-8")
+    (memory_dir / "long_term.md").write_text(
+        f"# {display_name}的长期记忆\n\n（随对话自然生长）\n",
+        encoding="utf-8",
+    )
+    (memory_dir / "status.md").write_text(_default_status(name), encoding="utf-8")
+    (memory_dir / "plans.md").write_text(_default_plans(name), encoding="utf-8")
 
 
 def get_profile(name: str) -> dict:
     """获取角色 profile"""
+    migrate_character_assets(name)
     path = settings.get_character_dir(name) / "profile.json"
     if not path.exists():
         raise ValueError(f"角色 '{name}' 不存在")
@@ -136,6 +200,101 @@ def update_profile(name: str, updates: dict):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(profile, f, ensure_ascii=False, indent=2)
     logger.info(f"角色 '{name}' profile 已更新")
+
+
+def migrate_all_character_assets():
+    """Move legacy split character assets into characters/{id}/."""
+    names = set()
+    for base in (
+        settings.legacy_characters_dir,
+        settings.legacy_memory_dir,
+        settings.legacy_data_dir,
+        settings.characters_dir,
+    ):
+        if base.exists():
+            names.update(d.name for d in base.iterdir() if d.is_dir())
+    for name in sorted(names):
+        migrate_character_assets(name)
+
+
+def migrate_character_assets(name: str):
+    """Migrate one character from legacy config/memory/data folders."""
+    dst = settings.get_character_dir(name)
+    legacy_config = settings.legacy_characters_dir / name
+    legacy_memory = settings.legacy_memory_dir / name
+    legacy_data = settings.legacy_data_dir / name
+
+    dst.mkdir(parents=True, exist_ok=True)
+    memory_dst = settings.get_memory_dir(name)
+    images_dst = settings.get_images_dir(name)
+    vector_dst = settings.get_vector_dir(name)
+    memory_dst.mkdir(parents=True, exist_ok=True)
+    images_dst.mkdir(parents=True, exist_ok=True)
+    vector_dst.parent.mkdir(parents=True, exist_ok=True)
+
+    if not any(p.exists() for p in (legacy_config, legacy_memory, legacy_data)):
+        return
+
+    if legacy_config.exists():
+        _move_children(legacy_config, dst)
+        _remove_empty_dir(legacy_config)
+
+    if legacy_memory.exists():
+        memory_dst.mkdir(parents=True, exist_ok=True)
+        _move_children(legacy_memory, memory_dst)
+        _remove_empty_dir(legacy_memory)
+
+    if legacy_data.exists():
+        images_src = legacy_data / "images"
+        chroma_src = legacy_data / "chroma_db"
+        if images_src.exists():
+            images_dst.mkdir(parents=True, exist_ok=True)
+            _move_children(images_src, images_dst)
+            _remove_empty_dir(images_src)
+        if chroma_src.exists():
+            vector_dst.mkdir(parents=True, exist_ok=True)
+            _move_children(chroma_src, vector_dst)
+            _remove_empty_dir(chroma_src)
+        _move_non_asset_children(legacy_data, dst / "data")
+        _remove_empty_dir(legacy_data)
+
+
+def _move_children(src: Path, dst: Path):
+    dst.mkdir(parents=True, exist_ok=True)
+    for item in list(src.iterdir()):
+        target = dst / item.name
+        if target.exists():
+            if item.is_dir():
+                _move_children(item, target)
+                _remove_empty_dir(item)
+            else:
+                item.unlink(missing_ok=True)
+            continue
+        shutil.move(str(item), str(target))
+
+
+def _move_non_asset_children(src: Path, dst: Path):
+    for item in list(src.iterdir()):
+        if item.name in {"images", "chroma_db"}:
+            continue
+        dst.mkdir(parents=True, exist_ok=True)
+        target = dst / item.name
+        if target.exists():
+            if item.is_dir():
+                _move_children(item, target)
+                _remove_empty_dir(item)
+            else:
+                item.unlink(missing_ok=True)
+        else:
+            shutil.move(str(item), str(target))
+
+
+def _remove_empty_dir(path: Path):
+    try:
+        if path.exists() and path.is_dir() and not any(path.iterdir()):
+            path.rmdir()
+    except Exception:
+        pass
 
 
 def _load_settings() -> dict:

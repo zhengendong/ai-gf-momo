@@ -202,6 +202,31 @@ def append_unique_section_lines(text: str, section: str, lines: list[str]) -> st
     return text[:match.start(2)] + new_body + "\n\n" + text[match.end(2):]
 
 
+def is_identity_conflict_memory(character: str, text: str) -> bool:
+    """Return True when a memory line appears to redefine this character as another role."""
+    if not text:
+        return False
+    from .context import get_character_name
+    current_names = {character, get_character_name(character)}
+    other_names = set()
+    if settings.characters_dir.exists():
+        for item in settings.characters_dir.iterdir():
+            if not item.is_dir() or item.name == character:
+                continue
+            other_names.add(item.name)
+            try:
+                other_names.add(get_character_name(item.name))
+            except Exception:
+                pass
+    other_names -= current_names
+    if not other_names:
+        return False
+    markers = ("我是", "我叫", "你是", "她是", "角色是", "名字是")
+    if not any(marker in text for marker in markers):
+        return False
+    return any(name and name in text for name in other_names)
+
+
 def should_recall_vector_memory(message: str) -> bool:
     text = (message or "").strip()
     if not text:

@@ -36,7 +36,9 @@ class ImageTool:
             workflow_name=workflow_name,
             width=width,
             height=height,
+            character=character,
             filename_prefix=character,
+            inject_character_tags=False,
         )
         return workflow, final_prompt
 

@@ -256,7 +256,14 @@ class AgentRuntime:
         try:
             path = settings.get_memory_dir(character) / "long_term.md"
             path.parent.mkdir(parents=True, exist_ok=True)
-            from ..core.memory_v3 import append_unique_section_lines, ensure_long_term_sections
+            from ..core.memory_v3 import (
+                append_unique_section_lines,
+                ensure_long_term_sections,
+                is_identity_conflict_memory,
+            )
+            if is_identity_conflict_memory(character, memory):
+                logger.warning("Immediate memory dropped as identity conflict: %s", memory)
+                return
             existing = path.read_text(encoding="utf-8") if path.exists() else ""
             existing = ensure_long_term_sections(existing, character)
             updated = append_unique_section_lines(existing, "重要事件", [memory])

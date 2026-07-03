@@ -8,9 +8,9 @@ import logging
 from typing import Optional
 
 from ..models.schemas import AgentOutput
-from ..core.context import assemble_momo_prompt
+from ..core.context import assemble_momo_prompt, get_character_name, save_conversation_summary
 from ..core.compressor import estimate_tokens, needs_compression, compress_conversation
-from ..core.characters import get_active, get_profile
+from ..core.characters import get_active
 from ..utils.helpers import read_markdown
 
 logger = logging.getLogger(__name__)
@@ -25,38 +25,41 @@ class MomoAgent:
             llm_client: LLM 客户端，需支持 chat(system, user) → str
         """
         self.llm = llm_client
-        self._system_prompt = None
+        self._system_prompts: dict[str, str] = {}
 
-    @property
-    def system_prompt(self) -> str:
+    def system_prompt(self, character: str = None) -> str:
         """加载 agent.md 作为 system prompt"""
-        if self._system_prompt is None:
+        char = character or get_active()
+        if char not in self._system_prompts:
             try:
                 content = read_markdown(self._agent_path)
                 # 替换 {name} 占位符
-                char = get_active()
-                profile = get_profile(char)
-                content = content.replace("{name}", profile.get("name", char))
-                self._system_prompt = content
+                content = content.replace("{name}", get_character_name(char))
+                self._system_prompts[char] = content
             except Exception as e:
                 logger.error(f"加载 agent.md 失败: {e}")
-                self._system_prompt = "你是小桃，一个沉浸式AI女友。请用JSON格式回复。"
-        return self._system_prompt
+                self._system_prompts[char] = f"你是{char}，一个沉浸式AI伴侣。请用JSON格式回复。"
+        return self._system_prompts[char]
 
     @property
     def _agent_path(self):
         from ..config import settings
         return settings.agent_file
 
-    def reload_system_prompt(self):
+    def reload_system_prompt(self, character: str = None):
         """热重载 agent.md"""
-        self._system_prompt = None
+        if character:
+            self._system_prompts.pop(character, None)
+        else:
+            self._system_prompts.clear()
 
     async def process(
         self,
         user_message: str,
+        character: str = None,
         chat_history: str = "",
         conversation_summary: str = "",
+        recalled_memories: str = "",
     ) -> AgentOutput:
         """
         处理用户消息
@@ -65,19 +68,22 @@ class MomoAgent:
             user_message: 用户输入
             chat_history: 最近对话历史
             conversation_summary: 旧对话摘要
+            recalled_memories: 向量库召回的相关历史片段
 
         Returns:
             AgentOutput
         """
-        character = get_active()
+        character = character or get_active()
+        system_prompt = self.system_prompt(character)
 
         # 1. 检查上下文窗口
         prompt = assemble_momo_prompt(
             character, user_message,
             chat_history=chat_history,
-            conversation_summary=conversation_summary
+            conversation_summary=conversation_summary,
+            recalled_memories=recalled_memories,
         )
-        total_tokens = estimate_tokens(self.system_prompt + prompt)
+        total_tokens = estimate_tokens(system_prompt + prompt)
 
         # 2. 如果需要压缩，压缩后重新组装
         if needs_compression(total_tokens):
@@ -87,20 +93,23 @@ class MomoAgent:
                 self.llm, conversation_summary, to_compress
             )
             conversation_summary = new_summary
+            save_conversation_summary(character, conversation_summary)
             # 清空 chat_history，用摘要替代
             prompt = assemble_momo_prompt(
                 character, user_message,
                 chat_history="",
-                conversation_summary=conversation_summary
+                conversation_summary=conversation_summary,
+                recalled_memories=recalled_memories,
             )
 
         # 3. 调用 LLM
         try:
-            raw = await self.llm.chat_prompt(system=self.system_prompt, user=prompt)
+            raw = await self.llm.chat_prompt(system=system_prompt, user=prompt)
             output = self._parse_output(raw)
         except Exception as e:
             logger.error(f"Momo Agent 调用失败: {e}")
-            output = AgentOutput(reply=f"（小桃走神了…等一下哦～）\n错误: {e}")
+            char_name = get_character_name(character)
+            output = AgentOutput(reply=f"（{char_name}走神了…等一下哦～）\n错误: {e}")
 
         return output
 
@@ -121,6 +130,8 @@ class MomoAgent:
                 photo_prompt=data.get("photo_prompt"),
                 state_updates=data.get("state_updates"),
                 immediate_memory=data.get("immediate_memory"),
+                plan_updates=data.get("plan_updates"),
+                persist_context=data.get("persist_context", True),
             )
         except (json.JSONDecodeError, KeyError) as e:
             logger.warning(f"解析 Agent 输出失败: {e}, raw={raw[:200]}")

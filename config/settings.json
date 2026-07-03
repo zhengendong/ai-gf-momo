@@ -1,8 +1,8 @@
 {
-  "active_character": "momo",
+  "active_character": "xiaowen",
   "context": {
     "max_tokens": 2000,
-    "compress_at": 0.7
+    "compress_at": 0.9
   },
   "comfyui": {
     "workflow": "waiNSFWIllustrious_v140.json",
@@ -20,8 +20,11 @@
     "quiet_end": "08:00"
   },
   "memory": {
-    "condensation_time": "02:00",
     "condensation_days": 1,
-    "retention_days": 30
+    "retention_days": 30,
+    "turns_per_condense": 15,
+    "vector_recall_enabled": true,
+    "vector_top_k": 5,
+    "vector_max_distance": 0.55
   }
 }

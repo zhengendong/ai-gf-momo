@@ -23,10 +23,12 @@ export function useImageHistory() {
   const canGoPrev = computed(() => currentIndex.value < images.value.length - 1)
   const canGoNext = computed(() => currentIndex.value > 0)
 
-  async function fetchHistory(limit = 50) {
+  async function fetchHistory(limit = 50, character = '') {
     loading.value = true
     try {
-      const res = await fetch(`${API_BASE}/image/history?limit=${limit}`)
+      const qs = new URLSearchParams({ limit: String(limit) })
+      if (character) qs.set('character', character)
+      const res = await fetch(`${API_BASE}/image/history?${qs.toString()}`)
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const data = await res.json()
       images.value = data.items || []
