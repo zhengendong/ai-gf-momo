@@ -56,15 +56,15 @@
       </div>
       <div class="form-field">
         <label>角色锚点标签</label>
-        <textarea v-model="form.avatar_role" rows="2"></textarea>
+        <textarea v-model="form.role_tags" rows="2"></textarea>
       </div>
       <div class="form-field">
         <label>体型标签</label>
-        <textarea v-model="form.body_type" rows="2"></textarea>
+        <textarea v-model="form.body_tags" rows="2"></textarea>
       </div>
       <div class="form-field">
         <label>外貌标签</label>
-        <textarea v-model="form.appearance" rows="3"></textarea>
+        <textarea v-model="form.appearance_tags" rows="3"></textarea>
       </div>
       <div class="form-field">
         <label>身份设定</label>
@@ -104,9 +104,9 @@ function defaultForm() {
     name: '',
     avatar: '💕',
     preset_name: '',
-    avatar_role: '',
-    body_type: '',
-    appearance: '',
+    role_tags: '',
+    body_tags: '',
+    appearance_tags: '',
     identity: '',
   }
 }
@@ -142,14 +142,11 @@ async function saveModal() {
   await createCharacter(form.id, {
     name: form.name || form.id,
     avatar: form.avatar,
-    avatar_role: form.avatar_role,
-    body_type: form.body_type,
-    appearance: form.appearance,
     visual_anchor: {
       preset_name: form.preset_name,
-      role_tags: form.avatar_role,
-      body_tags: form.body_type,
-      appearance_tags: form.appearance,
+      role_tags: form.role_tags,
+      body_tags: form.body_tags,
+      appearance_tags: form.appearance_tags,
     },
     identity: form.identity,
   })

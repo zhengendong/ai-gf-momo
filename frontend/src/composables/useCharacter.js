@@ -4,14 +4,11 @@ const API = '/api'
 
 // 模块级单例 — 所有调用者共享同一份数据
 const characters = ref([])
-const activeCharId = ref('')  // 目录名（API 标识），不是显示名
+const activeCharId = ref('')
 const profile = reactive({
   name: '',
   gender: 'female',
   avatar: '',
-  avatar_role: '',
-  body_type: '',
-  appearance: '',
   visual_anchor: {
     preset_name: '',
     role_tags: '',
@@ -20,6 +17,26 @@ const profile = reactive({
   }
 })
 const loading = ref(false)
+
+const emptyProfile = () => ({
+  name: '',
+  gender: 'female',
+  avatar: '',
+  visual_anchor: {
+    preset_name: '',
+    role_tags: '',
+    body_tags: '',
+    appearance_tags: ''
+  }
+})
+
+const normalizeVisual = (raw) => ({
+  preset_name: '',
+  role_tags: '',
+  body_tags: '',
+  appearance_tags: '',
+  ...(raw || {})
+})
 
 export function useCharacter() {
   const loadAll = async () => {
@@ -41,27 +58,19 @@ export function useCharacter() {
   const loadProfile = async (charId) => {
     try {
       const p = await fetch(`${API}/characters/${charId}/profile`).then(r => r.json())
-      const visual = {
-        preset_name: '',
-        role_tags: p.avatar_role || '',
-        body_tags: p.body_type || '',
-        appearance_tags: p.appearance || '',
-        ...(p.visual_anchor || {})
-      }
-      Object.assign(profile, {
-        name: '',
-        gender: 'female',
-        avatar: '',
-        avatar_role: visual.role_tags,
-        body_type: visual.body_tags,
-        appearance: visual.appearance_tags,
-        visual_anchor: visual
-      }, p, {
-        avatar_role: visual.role_tags,
-        body_type: visual.body_tags,
-        appearance: visual.appearance_tags,
-        visual_anchor: visual
-      })
+      // profile.json 只存 visual_anchor 嵌套结构；老数据若有遗留平铺字段也兜底读一次
+      const visual = normalizeVisual(
+        p.visual_anchor ||
+          (p.avatar_role || p.body_type || p.appearance
+            ? {
+                preset_name: '',
+                role_tags: p.avatar_role || '',
+                body_tags: p.body_type || '',
+                appearance_tags: p.appearance || ''
+              }
+            : null)
+      )
+      Object.assign(profile, emptyProfile(), p, { visual_anchor: visual })
     } catch (e) {
       console.error('加载角色资料失败:', e)
     }
@@ -78,10 +87,21 @@ export function useCharacter() {
       console.error('无法保存：未知角色 ID')
       return
     }
+    const payload = {
+      name: profile.name,
+      gender: profile.gender,
+      avatar: profile.avatar,
+      visual_anchor: {
+        preset_name: profile.visual_anchor?.preset_name || '',
+        role_tags: profile.visual_anchor?.role_tags || '',
+        body_tags: profile.visual_anchor?.body_tags || '',
+        appearance_tags: profile.visual_anchor?.appearance_tags || ''
+      }
+    }
     const res = await fetch(`${API}/characters/${charId}/profile`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(profile)
+      body: JSON.stringify(payload)
     })
     if (!res.ok) {
       const err = await res.json().catch(() => ({}))

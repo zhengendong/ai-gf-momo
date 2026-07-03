@@ -1,7 +1,11 @@
 {
   "name": "小桃",
   "avatar": "💕",
-  "avatar_role": "corin wickes, zenless zone zero,solo",
-  "body_type": "petite, small breasts, slim, narrow waist",
-  "appearance": "purple eyes, hair between eyes, screw hair ornament, green hair, long hair, twintails,"
+  "visual_anchor": {
+    "preset_name": "",
+    "role_tags": "corin wickes, zenless zone zero,solo",
+    "body_tags": "petite, small breasts, slim, narrow waist",
+    "appearance_tags": "purple eyes, hair between eyes, screw hair ornament, green hair, long hair, twintails,"
+  },
+  "gender": "female"
 }

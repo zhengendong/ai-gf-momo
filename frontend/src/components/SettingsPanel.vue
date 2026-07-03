@@ -84,15 +84,15 @@
           </div>
           <div class="form-field">
             <label>角色锚点标签</label>
-            <textarea v-model="profile.avatar_role" rows="2" placeholder="danbooru 角色名或稳定识别标签，例如 hatsune_miku, solo"></textarea>
+            <textarea v-model="profile.visual_anchor.role_tags" rows="2" placeholder="danbooru 角色名或稳定识别标签，例如 hatsune_miku, solo"></textarea>
           </div>
           <div class="form-field">
             <label>体型标签</label>
-            <textarea v-model="profile.body_type" rows="2" placeholder="petite, small breasts, slim"></textarea>
+            <textarea v-model="profile.visual_anchor.body_tags" rows="2" placeholder="petite, small breasts, slim"></textarea>
           </div>
           <div class="form-field">
             <label>外貌标签</label>
-            <textarea v-model="profile.appearance" rows="3" placeholder="green hair, twintails, blue eyes"></textarea>
+            <textarea v-model="profile.visual_anchor.appearance_tags" rows="3" placeholder="green hair, twintails, blue eyes"></textarea>
           </div>
           <button @click="saveSkin" class="save-btn">保存皮肤</button>
         </div>
@@ -391,12 +391,8 @@ const onSaveProfile = async () => {
 }
 
 const saveSkin = async () => {
-  profile.visual_anchor = {
-    preset_name: profile.visual_anchor?.preset_name || '',
-    role_tags: profile.avatar_role || '',
-    body_tags: profile.body_type || '',
-    appearance_tags: profile.appearance || '',
-  }
+  // visual_anchor.* 已由 v-model 直接绑定，无需重新构造。
+  // saveProfile() 会从 profile.visual_anchor 读取并序列化。
   await saveProfile()
   showSaved()
 }

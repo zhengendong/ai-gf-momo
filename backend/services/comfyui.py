@@ -289,8 +289,12 @@ class ComfyUIService:
         if inject_character_tags:
             try:
                 profile = load_character_profile(char)
-                char_tags = f"{profile.get('avatar_role', '')}, {profile.get('body_type', '')}, {profile.get('appearance', '')}"
-                char_tags = char_tags.strip(", ")
+                visual = profile.get("visual_anchor") or {}
+                # visual_anchor 是单一真相；老 profile 的平铺字段作为兜底
+                avatar_role = visual.get("role_tags") or profile.get("avatar_role", "")
+                body_type = visual.get("body_tags") or profile.get("body_type", "")
+                appearance = visual.get("appearance_tags") or profile.get("appearance", "")
+                char_tags = ", ".join(t for t in (avatar_role, body_type, appearance) if t).strip(", ")
                 if char_tags:
                     prompt = f"{char_tags}, {prompt}"
                     prompt = self._normalize_prompt(prompt)

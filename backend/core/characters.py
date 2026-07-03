@@ -52,16 +52,9 @@ def create_character(name: str, profile: dict):
 
     char_dir.mkdir(parents=True, exist_ok=True)
 
-    # profile.json 是“皮肤”文件，只放视觉/元信息字段；身份文本落到 identity.md。
-    skin_keys = {"name", "avatar", "avatar_role", "body_type",
-                 "appearance", "gender", "visual_anchor"}
-    default_profile = {
-        "name": name,
-        "avatar": "💕",
-        "avatar_role": "",
-        "body_type": "",
-        "appearance": ""
-    }
+    # profile.json 是“皮肤”文件，皮肤信息只落进 visual_anchor（不重复存平铺字段）。
+    skin_keys = {"name", "avatar", "gender", "visual_anchor"}
+    default_profile = {"name": name, "avatar": "💕"}
     for k, v in profile.items():
         if k in skin_keys:
             default_profile[k] = v

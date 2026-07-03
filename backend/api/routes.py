@@ -99,13 +99,12 @@ async def create_char(request: CreateCharacterRequest):
             "body_tags": request.body_type,
             "appearance_tags": request.appearance,
         }
+        # 皮肤信息只落 visual_anchor（profile.json 里只有这一份真相）。
+        # avatar_role / body_type / appearance / gender 都不再回写到 profile.json 顶层。
         create_character(request.name, {
             "name": request.display_name or request.name,
             "gender": request.gender,
             "avatar": request.avatar,
-            "avatar_role": visual_anchor.get("role_tags", request.avatar_role),
-            "body_type": visual_anchor.get("body_tags", request.body_type),
-            "appearance": visual_anchor.get("appearance_tags", request.appearance),
             "visual_anchor": visual_anchor,
             "identity": request.identity,
         })
