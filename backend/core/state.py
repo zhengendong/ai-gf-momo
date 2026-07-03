@@ -10,6 +10,7 @@ from typing import Optional
 
 from ..config import settings
 from ..utils.helpers import read_markdown, write_markdown
+from .outfit_state import normalize_outfit_markdown
 
 logger = logging.getLogger(__name__)
 
@@ -179,6 +180,8 @@ def _deep_merge_markdown(character: str, current_text: str, updates: dict) -> st
             continue
 
         md_content = _value_to_markdown(content)
+        if canonical == "穿着":
+            md_content = normalize_outfit_markdown(md_content)
 
         # 穿着防呆：dict 只有 1-2 项但旧内容有 4+ 行 → 可能是 LLM 只发了变更项，拒绝
         if canonical == "穿着" and isinstance(content, dict):
@@ -212,17 +215,18 @@ def _default_status(character: str = "momo") -> str:
     return f"""# {char_name}的状态
 
 ## 穿着
-- 上衣：白色衬衫
-- 下衣：黑色百褶裙
-- 鞋子：黑色玛丽珍鞋
-- 袜子：白色过膝袜
-- 配饰：银色小心形项链、黑色铃铛项圈
+- white_shirt
+- black_pleated_skirt
+- black_mary_jane_shoes
+- white_thighhighs
+- silver_heart_necklace
+- black_bell_collar
 
 ## 场景细节
-- 地点：家里卧室
-- 环境：傍晚，窗外天色渐暗，房间里开着灯
-- 光线：暖色灯光
-- 时间段：傍晚
+- bedroom
+- indoors
+- evening
+- warm_lighting
 
 ## {char_name}的心情状态
 - 等待开始新的对话

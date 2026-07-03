@@ -106,6 +106,14 @@ def load_tag_reference() -> str:
     return ""
 
 
+def load_photo_rules() -> str:
+    """加载拍照和服饰状态规则。"""
+    path = settings.config_dir / "photo_rules.md"
+    if path.exists():
+        return read_markdown(path)
+    return ""
+
+
 def load_conversation_summary(character: str) -> str:
     """加载对话摘要（如有）"""
     path = settings.get_memory_dir(character) / "conversation_summary.md"
@@ -144,6 +152,7 @@ def assemble_momo_prompt(
     long_term = load_long_term(character)
     status = load_status(character)
     plans = load_plans(character)
+    photo_rules = load_photo_rules()
     char_name = profile.get("name", character)
     user_profile = render_user_profile(character)
     user_pet_name = get_user_pet_name(character)
@@ -170,6 +179,9 @@ def assemble_momo_prompt(
         "",
         "## 5. plans.md（当前计划）",
         plans or "（未填写）",
+        "",
+        "## 5.1 photo_rules.md（拍照、服饰、NSFW 状态规则）",
+        photo_rules or "（未填写）",
         "",
         "## 6. soul.md（慢变化人格层）",
         soul or "（未填写）",

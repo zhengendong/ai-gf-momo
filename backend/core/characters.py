@@ -75,12 +75,14 @@ def create_character(name: str, profile: dict):
 
     # 初始化记忆文件
     from .state import _default_status, _default_plans
-    from .memory_v3 import default_user_profile
+    from .memory_v3 import default_user_profile, save_user_profile, user_profile_path
     display_name = default_profile.get("name") or name
-    (memory_dir / "user.json").write_text(
+    user_profile_path(name).write_text(
         json.dumps(default_user_profile(), ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+    if profile.get("user_profile"):
+        save_user_profile(name, profile["user_profile"])
     (memory_dir / "soul.md").write_text(_default_soul(display_name), encoding="utf-8")
     (memory_dir / "long_term.md").write_text(f"# {display_name}的长期记忆\n\n（随对话自然生长）\n", encoding="utf-8")
     (memory_dir / "status.md").write_text(_default_status(name), encoding="utf-8")
@@ -147,6 +149,9 @@ def reset_character_memory(name: str):
     if not char_dir.exists():
         raise ValueError(f"角色 '{name}' 不存在")
 
+    from .memory_v3 import migrate_character_memory_v3
+    migrate_character_memory_v3(name)
+
     memory_dir = settings.get_memory_dir(name)
     images_dir = settings.get_images_dir(name)
     vector_dir = settings.get_vector_dir(name)
@@ -163,14 +168,9 @@ def reset_character_memory(name: str):
     images_dir.mkdir(parents=True, exist_ok=True)
     vector_root.mkdir(parents=True, exist_ok=True)
 
-    from .memory_v3 import default_user_profile
     from .state import _default_plans, _default_status
 
     display_name = get_profile(name).get("name") or name
-    (memory_dir / "user.json").write_text(
-        json.dumps(default_user_profile(), ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
     (memory_dir / "soul.md").write_text(_default_soul(display_name), encoding="utf-8")
     (memory_dir / "long_term.md").write_text(
         f"# {display_name}的长期记忆\n\n（随对话自然生长）\n",

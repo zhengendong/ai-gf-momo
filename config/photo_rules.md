@@ -97,6 +97,16 @@
 - 全裸 → `{"status": {"穿着": "- completely_nude"}}`
 - 裸体围裙 → `{"status": {"穿着": "- naked_apron\n- white_thighhighs"}}`
 
+## 场景规则（存状态，用英文标签）
+
+场景细节存状态，换地点/换时间/换光线/换环境时更新 `state_updates`。
+**所有场景细节用英文 SD 标签，一行一个 `- tag`**。不要写中文，系统不做翻译。
+**更新时务必列出当前完整场景**，不要只写变动的。后端会从 `status.md` 自动注入这些场景标签到最终生图 prompt。
+
+示例：
+- 默认卧室傍晚 → `{"status": {"场景细节": "- bedroom\n- indoors\n- evening\n- warm_lighting"}}`
+- 浴室夜晚 → `{"status": {"场景细节": "- bathroom\n- indoors\n- night\n- dim_lighting"}}`
+
 ## photo_prompt 格式
 
 **photo_prompt 只包含以下类别（其他一律不写）**：
@@ -104,7 +114,7 @@
 | 类别 | 说明 | 示例 |
 |------|------|------|
 | Rating | 你自己判断 | `rating:nsfw` |
-| 场景/环境 | 从 status.md「场景细节」逐项翻译 | `sitting_on_bed, bedroom` |
+| 场景/环境 | 只写本轮临时动作相关场景；稳定场景由系统从 status.md 自动注入 | `sitting_on_bed` |
 | 动作/姿势 | 根据用户要求当场决定 | `lying_down, legs_spread` |
 | 表情 | 当前表情 | `shy_expression, blushing, looking_at_viewer` |
 | 镜头/视角 | 根据用户要求当场决定 | `close-up, face_focus` |
@@ -112,6 +122,7 @@
 | 画质 | 固定，写在最后 | `masterpiece, best quality, amazing quality` |
 
 > 不需要写服饰标签——系统从状态文件自动生成。
+> 不需要重复写稳定场景标签——系统从状态文件自动生成。
 > 系统已负责以下标签：角色名、发色、瞳色、体型。
 
 ## 正确示例

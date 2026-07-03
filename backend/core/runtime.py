@@ -1,8 +1,8 @@
 """Agent runtime orchestration."""
 
-import asyncio
 import json
 import logging
+from datetime import datetime
 from typing import Protocol
 
 import httpx
@@ -11,13 +11,26 @@ from ..agents.image import ImagePipeline
 from ..agents.memory import MemoryAgent
 from ..agents.momo import MomoAgent
 from ..config import settings
-from ..core.chat_history import append_chat_pair, format_recent_chat_for_prompt
+from ..core.chat_history import append_chat_pair
 from ..core.context import (
+    append_daily_memory,
+    assemble_momo_prompt,
     get_character_name,
     get_user_pet_name,
-    load_conversation_summary,
+)
+from ..core.memory_policy import (
+    build_context_window,
+    bump_turn_and_should_condense,
+    index_chat_pair,
+    memory_settings,
+    recall_vector_context,
+    reset_condense_counter,
 )
 from ..core.orchestrator import bg_tasks
+from ..core.output_monitor import (
+    check_output_consistency,
+    repair_output_consistency,
+)
 from ..core.plan_manager import (
     PLAN_FIELDS,
     add_plan as _add_plan,
@@ -27,7 +40,6 @@ from ..core.plan_manager import (
 from ..core.state import apply_state_updates
 from ..core.time_system import write_last_chat
 from ..models.schemas import StreamChunk
-from ..services.llm import LLMContentRejectedError, content_rejection_reason
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +57,7 @@ class ChunkSender(Protocol):
 
 
 class AgentRuntime:
-    """Coordinates one websocket message through chat, state, memory and image flows."""
+    """Coordinate one websocket message through chat, state, memory and tools."""
 
     def __init__(self, llm_service, comfyui_service, sender: ChunkSender):
         self.sender = sender
@@ -67,29 +79,33 @@ class AgentRuntime:
     async def handle_message(self, session_id: str, character: str, content: str):
         char = character
         char_name = get_character_name(char)
-        user_pet = get_user_pet_name(char)
-        user_label = user_pet or "用户"
+        user_label = get_user_pet_name(char) or "用户"
         buffer_key = (session_id, char)
 
         try:
             history = self.chat_history_buffer.get(buffer_key, [])
-            if history:
+            base_prompt = assemble_momo_prompt(char, content)
+            summary, chat_history = await build_context_window(
+                self.momo_agent.llm,
+                char,
+                char_name,
+                user_label,
+                base_prompt,
+                self.momo_agent.system_prompt(char),
+            )
+            if not chat_history and history:
                 chat_history = "\n".join(history[-MAX_HISTORY_TURNS:])
-            else:
-                chat_history = format_recent_chat_for_prompt(
-                    char,
-                    char_name,
-                    user_label,
-                    max_messages=MAX_HISTORY_TURNS * 2,
-                )
-            summary = load_conversation_summary(char)
+            recalled_memories = recall_vector_context(char, content)
 
             output = await self.momo_agent.process(
                 character=char,
                 user_message=content,
                 chat_history=chat_history,
                 conversation_summary=summary,
+                recalled_memories=recalled_memories,
             )
+
+            output = await self._ensure_consistent_output(char, content, output)
 
             await self.sender.send_chunk(
                 session_id,
@@ -110,17 +126,22 @@ class AgentRuntime:
                 )
                 return
 
-            tasks = []
-
+            wrote_runtime_state = False
             if output.state_updates:
-                tasks.append(asyncio.create_task(
-                    self._async_update_state(char, output.state_updates, session_id)
-                ))
+                await self._async_update_state(char, output.state_updates)
+                wrote_runtime_state = True
+
+            if output.plan_updates:
+                await self._async_apply_plan_updates(char, output.plan_updates)
+                wrote_runtime_state = True
+
+            if wrote_runtime_state:
+                await self.push_current_state(session_id, char)
 
             if output.photo_prompt:
-                tasks.append(asyncio.create_task(
+                bg_tasks.schedule(
                     self.image_pipeline.generate(session_id, output.photo_prompt, char)
-                ))
+                )
             else:
                 await self.sender.send_chunk(
                     session_id,
@@ -129,26 +150,31 @@ class AgentRuntime:
                 )
 
             if output.immediate_memory:
-                tasks.append(asyncio.create_task(
+                bg_tasks.schedule(
                     self._async_append_long_term(char, output.immediate_memory)
-                ))
+                )
 
-            if output.plan_updates:
-                tasks.append(asyncio.create_task(
-                    self._async_apply_plan_updates(char, output.plan_updates)
-                ))
-
-            tasks.append(asyncio.create_task(
+            bg_tasks.schedule(
+                self._async_append_daily(char, content, output.reply, output.photo_prompt)
+            )
+            bg_tasks.schedule(
                 self._async_append_chat_history(char, content, output.reply)
-            ))
+            )
+            bg_tasks.schedule(
+                self._async_index_vector_memory(char, content, output.reply)
+            )
+            if bump_turn_and_should_condense(char):
+                bg_tasks.schedule(
+                    self._async_condense_memory(char, trigger="turn_interval")
+                )
 
             try:
                 write_last_chat(char)
             except Exception as e:
                 logger.debug("write_last_chat failed: %s", e)
 
-            history.append(f"{user_label}: {content}")
-            history.append(f"{char_name}: {output.reply}")
+            history.append(f"{user_label}：{content}")
+            history.append(f"{char_name}：{output.reply}")
             self.chat_history_buffer[buffer_key] = history[-MAX_HISTORY_TURNS:]
 
             await self.sender.send_chunk(
@@ -162,15 +188,12 @@ class AgentRuntime:
             logger.error("Message handling failed for %s: %s", char, e, exc_info=True)
             await self.sender.send_chunk(
                 session_id,
-                StreamChunk(
-                    type="text",
-                    content=content,
-                ),
+                StreamChunk(type="text", content=content),
                 character=char,
             )
 
     async def refresh_memory(self, session_id: str, character: str):
-        bg_tasks.schedule(self.memory_agent.condense(character))
+        bg_tasks.schedule(self._async_condense_memory(character, trigger="manual"))
         await self.sender.send_chunk(
             session_id,
             StreamChunk(type="text", content="记忆刷新已触发～"),
@@ -190,7 +213,7 @@ class AgentRuntime:
                     content=json.dumps({
                         "character": character,
                         "status": self._parse_status_sections(status_content, character),
-                        "plans": self._parse_status_sections(plans_content, character),
+                        "plans": self._parse_plan_sections(plans_content),
                     }, ensure_ascii=False),
                 ),
                 character=character,
@@ -201,13 +224,50 @@ class AgentRuntime:
     def reload_system_prompt(self, character: str | None = None):
         self.momo_agent.reload_system_prompt(character)
 
+    async def _ensure_consistent_output(
+        self,
+        character: str,
+        user_message: str,
+        output,
+    ):
+        result = await check_output_consistency(
+            self.momo_agent.llm,
+            character,
+            user_message,
+            output,
+        )
+        if result.valid or not result.needs_repair:
+            return output
+
+        logger.info("Output monitor requested repair for %s: %s", character, result.issues)
+        repaired = await repair_output_consistency(
+            self.momo_agent.llm,
+            character,
+            user_message,
+            output,
+            result,
+        )
+        second = await check_output_consistency(
+            self.momo_agent.llm,
+            character,
+            user_message,
+            repaired,
+        )
+        if second.valid:
+            return repaired
+
+        logger.warning(
+            "Output still inconsistent after repair for %s: %s",
+            character,
+            second.issues,
+        )
+        repaired.photo_prompt = None
+        return repaired
+
     def _format_user_facing_error(self, char_name: str, error: Exception) -> str:
-        if isinstance(error, LLMContentRejectedError):
-            return str(error)
         if isinstance(error, httpx.HTTPStatusError):
-            reason = content_rejection_reason(error.response.status_code, error.response.text)
-            if reason:
-                return reason
+            body = error.response.text[:200]
+            return f"（{char_name}走神了...等一下哦）\nLLM API {error.response.status_code}: {body}"
         return f"（{char_name}走神了...等一下哦）\n错误: {error}"
 
     async def _async_update_state(
@@ -228,13 +288,13 @@ class AgentRuntime:
             for p in plan_updates.get("add", []) or []:
                 _add_plan(
                     character,
-                    name=p.get("name", "").strip(),
+                    name=(p.get("name") or "").strip(),
                     plan_type=p.get("type", "short"),
                     target=p.get("target", ""),
                     complete_when=p.get("complete_when", ""),
                 )
             for p in plan_updates.get("update", []) or []:
-                name = p.get("name", "").strip()
+                name = (p.get("name") or "").strip()
                 if not name:
                     continue
                 kwargs = {
@@ -244,7 +304,7 @@ class AgentRuntime:
                 }
                 _update_plan(character, name, **kwargs)
             for p in plan_updates.get("close", []) or []:
-                name = p.get("name", "").strip()
+                name = (p.get("name") or "").strip()
                 reason = p.get("reason", "completed")
                 if name:
                     _close_plan(character, name, reason)
@@ -271,13 +331,60 @@ class AgentRuntime:
         except Exception as e:
             logger.error("Append long_term failed for %s: %s", character, e)
 
+    async def _async_append_daily(
+        self,
+        character: str,
+        user_msg: str,
+        reply: str,
+        photo_prompt: str | None = None,
+    ):
+        try:
+            now = datetime.now().strftime("%H:%M")
+            user_label = get_user_pet_name(character)
+            char_name = get_character_name(character)
+            content = f"### {now} {user_label}说：\n{user_msg}\n\n### {char_name}说：\n{reply}"
+            if photo_prompt:
+                content += f"\n\n📷 {photo_prompt}"
+            append_daily_memory(character, content)
+        except Exception as e:
+            logger.error("Append daily memory failed for %s: %s", character, e)
+
     async def _async_append_chat_history(self, character: str, user_msg: str, reply: str):
         try:
             append_chat_pair(character, user_msg, reply)
         except Exception as e:
             logger.error("Append chat_history failed for %s: %s", character, e)
 
+    async def _async_index_vector_memory(self, character: str, user_msg: str, reply: str):
+        try:
+            index_chat_pair(character, user_msg, reply)
+        except Exception as e:
+            logger.error("Index vector memory failed for %s: %s", character, e)
+
+    async def _async_condense_memory(self, character: str, trigger: str = "manual"):
+        try:
+            days = int(memory_settings().get("condensation_days") or 1)
+            await self.memory_agent.condense(character, days=days)
+            reset_condense_counter(character, trigger=trigger)
+        except Exception as e:
+            logger.error("Memory condensation failed for %s: %s", character, e)
+
     def _parse_status_sections(self, content: str, character: str | None = None) -> dict:
+        sections = self._parse_markdown_sections(content)
+
+        if character:
+            from ..core.state import _allowed_sections as _state_allowed
+            allowed = _state_allowed(character)
+        else:
+            allowed = {"穿着", "场景细节"}
+        return {k: v for k, v in sections.items() if k in allowed}
+
+    def _parse_plan_sections(self, content: str) -> dict:
+        sections = self._parse_markdown_sections(content)
+        allowed = {"当前目标", "想做的事"}
+        return {k: v for k, v in sections.items() if k in allowed}
+
+    def _parse_markdown_sections(self, content: str) -> dict:
         sections = {}
         current_title = None
         current_lines = []
@@ -293,10 +400,4 @@ class AgentRuntime:
                 current_lines.append(line)
         if current_title:
             sections[current_title] = "\n".join(current_lines).strip()
-
-        if character:
-            from ..core.state import _allowed_sections as _state_allowed
-            allowed = _state_allowed(character)
-        else:
-            allowed = {"穿着", "场景细节"}
-        return {k: v for k, v in sections.items() if k in allowed}
+        return sections

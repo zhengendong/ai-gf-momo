@@ -66,6 +66,24 @@
         <label>身份设定</label>
         <textarea v-model="form.identity" rows="6"></textarea>
       </div>
+      <div class="form-field">
+        <label>用户设定</label>
+        <textarea v-model="form.user_identity" rows="4" placeholder="用户是谁、关系定位、称呼偏好等"></textarea>
+      </div>
+      <div class="form-row">
+        <div class="form-field">
+          <label>用户称呼</label>
+          <input v-model.trim="form.user_pet_name" placeholder="主人" />
+        </div>
+        <div class="form-field">
+          <label>沟通偏好</label>
+          <input v-model.trim="form.communication_style" placeholder="温柔、直接、调皮..." />
+        </div>
+      </div>
+      <div class="form-field">
+        <label>用户备注</label>
+        <textarea v-model="form.user_notes" rows="3"></textarea>
+      </div>
       <div class="modal-actions">
         <button class="primary" @click="saveModal" :disabled="!form.id">创建</button>
         <button @click="closeModal">取消</button>
@@ -103,6 +121,10 @@ function defaultForm() {
     body_tags: '',
     appearance_tags: '',
     identity: '',
+    user_identity: '',
+    user_pet_name: '',
+    communication_style: '',
+    user_notes: '',
   }
 }
 
@@ -143,6 +165,12 @@ async function saveModal() {
       appearance_tags: form.appearance_tags,
     },
     identity: form.identity,
+    user_profile: {
+      user_pet_name: form.user_pet_name,
+      identity: form.user_identity,
+      communication_style: form.communication_style,
+      notes: form.user_notes,
+    },
   })
   closeModal()
   await switchCharacter(form.id)

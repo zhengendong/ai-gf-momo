@@ -188,16 +188,62 @@ def get_clothing_tags(character: str = None) -> str:
     """获取角色的服饰标签字符串"""
     char = character or get_active()
     try:
-        snapshot = read_state_snapshot(char)
-        tags = snapshot.get("outfit", {}).get("tags", [])
-        if not tags:
-            status_md = read_status(char)
-            tags = parse_clothing_status(status_md)
-    except Exception as e:
-        logger.warning(f"读取 state_snapshot 失败，回退 status.md: {e}")
         status_md = read_status(char)
         tags = parse_clothing_status(status_md)
+        if not tags:
+            snapshot = read_state_snapshot(char)
+            tags = snapshot.get("outfit", {}).get("tags", [])
+    except Exception as e:
+        logger.warning(f"读取 status.md 失败，回退 state_snapshot: {e}")
+        snapshot = read_state_snapshot(char)
+        tags = snapshot.get("outfit", {}).get("tags", [])
     tags = _resolve_clothing_conflicts(tags)
+    return ", ".join(tags)
+
+
+def parse_scene_status(status_md: str) -> list[str]:
+    """从 status.md 的 ## 场景细节 section 解析英文 SD 标签。"""
+    m = re.search(r"## 场景细节\n(.*?)(?=## |\Z)", status_md, re.DOTALL)
+    if not m:
+        logger.warning("status.md 缺少 ## 场景细节 section，跳过场景注入")
+        return []
+
+    content = m.group(1).strip()
+    if not content:
+        logger.warning("status.md 场景细节为空，跳过场景注入")
+        return []
+
+    tags = []
+    for line in content.split("\n"):
+        line = line.strip()
+        if not line.startswith("-"):
+            continue
+        raw = line[1:].strip()
+        for tag in _split_status_tags(raw):
+            if tag not in tags:
+                tags.append(tag)
+
+    if not tags:
+        logger.warning("场景细节没有可用英文标签，跳过场景注入")
+        return []
+
+    logger.info(f"已从状态生成场景标签: {tags}")
+    return tags
+
+
+def get_scene_tags(character: str = None) -> str:
+    """获取角色当前场景标签字符串，用于生图 prompt 注入。"""
+    char = character or get_active()
+    try:
+        status_md = read_status(char)
+        tags = parse_scene_status(status_md)
+        if not tags:
+            snapshot = read_state_snapshot(char)
+            tags = snapshot.get("scene", {}).get("tags", [])
+    except Exception as e:
+        logger.warning(f"读取 status.md 场景失败，回退 state_snapshot: {e}")
+        snapshot = read_state_snapshot(char)
+        tags = snapshot.get("scene", {}).get("tags", [])
     return ", ".join(tags)
 
 
@@ -352,8 +398,9 @@ def build_image_prompt(character: str, prompt: str) -> str:
         body_type = ""
 
     char_tags = ", ".join(p for p in [avatar_role, body_type, appearance] if p)
+    scene_tags = get_scene_tags(character)
     clothing_tags = get_clothing_tags(character)
-    parts = [p for p in [char_tags, prompt, clothing_tags] if p]
+    parts = [p for p in [char_tags, prompt, scene_tags, clothing_tags] if p]
     final_prompt = normalize_prompt(
         normalize_camera_action_tags(
             _harmonize_rating(", ".join(parts))

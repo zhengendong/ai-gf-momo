@@ -28,6 +28,10 @@ def default_user_profile() -> dict:
 
 
 def user_profile_path(character: str) -> Path:
+    return settings.get_character_dir(character) / USER_JSON
+
+
+def legacy_user_profile_path(character: str) -> Path:
     return settings.get_memory_dir(character) / USER_JSON
 
 
@@ -74,26 +78,34 @@ def render_user_profile(profile: dict) -> str:
 
 
 def migrate_character_memory_v3(character: str) -> bool:
-    """Create user.json and merge old personality/preferences into long_term.md.
+    """Create root user.json and merge old personality/preferences into long_term.md.
 
     Returns True if any file changed.
     """
+    char_dir = settings.get_character_dir(character)
+    char_dir.mkdir(parents=True, exist_ok=True)
     memory_dir = settings.get_memory_dir(character)
     memory_dir.mkdir(parents=True, exist_ok=True)
     changed = False
 
-    user_path = memory_dir / USER_JSON
+    user_path = user_profile_path(character)
+    legacy_user_path = legacy_user_profile_path(character)
     old_user_path = memory_dir / OLD_USER_JSON
     old_profile = {}
+    if legacy_user_path.exists():
+        try:
+            old_profile.update(json.loads(legacy_user_path.read_text(encoding="utf-8")))
+        except Exception:
+            pass
     if old_user_path.exists():
         try:
-            old_profile = json.loads(old_user_path.read_text(encoding="utf-8"))
+            old_profile.update(json.loads(old_user_path.read_text(encoding="utf-8")))
         except Exception:
-            old_profile = {}
+            pass
 
     if not user_path.exists():
         profile = default_user_profile()
-        for key in ("user_pet_name", "identity", "communication_style", "last_updated"):
+        for key in ("user_pet_name", "identity", "communication_style", "notes", "last_updated"):
             if old_profile.get(key):
                 profile[key] = old_profile[key]
         user_path.write_text(json.dumps(profile, ensure_ascii=False, indent=2), encoding="utf-8")

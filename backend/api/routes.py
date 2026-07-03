@@ -74,6 +74,7 @@ class CreateCharacterRequest(BaseModel):
     appearance: str = ""
     visual_anchor: dict = None
     identity: str = ""
+    user_profile: dict = None
 
 
 @router.get("/characters")
@@ -106,6 +107,7 @@ async def create_char(request: CreateCharacterRequest):
             "avatar": request.avatar,
             "visual_anchor": visual_anchor,
             "identity": request.identity,
+            "user_profile": request.user_profile,
         })
         return {"status": "ok", "name": request.name}
     except ValueError as e:
