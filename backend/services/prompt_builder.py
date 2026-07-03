@@ -209,7 +209,6 @@ def get_visual_anchor_tags(character: str) -> dict:
         "role_tags": visual.get("role_tags") or profile.get("avatar_role", ""),
         "body_tags": visual.get("body_tags") or profile.get("body_type", ""),
         "appearance_tags": visual.get("appearance_tags") or profile.get("appearance", ""),
-        "preset_name": visual.get("preset_name", ""),
     }
 
 

@@ -53,7 +53,6 @@ def render_profile_summary(character: str, profile: dict | None = None) -> str:
         f"- name: {profile.get('name') or character}",
         f"- gender: {profile.get('gender') or ''}",
         f"- avatar: {profile.get('avatar') or ''}",
-        f"- visual.preset_name: {visual.get('preset_name') or ''}",
         f"- visual.role_tags: {visual.get('role_tags') or profile.get('avatar_role', '')}",
         f"- visual.body_tags: {visual.get('body_tags') or profile.get('body_type', '')}",
         f"- visual.appearance_tags: {visual.get('appearance_tags') or profile.get('appearance', '')}",

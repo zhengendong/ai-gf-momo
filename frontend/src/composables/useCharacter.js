@@ -10,7 +10,6 @@ const profile = reactive({
   gender: 'female',
   avatar: '',
   visual_anchor: {
-    preset_name: '',
     role_tags: '',
     body_tags: '',
     appearance_tags: ''
@@ -23,7 +22,6 @@ const emptyProfile = () => ({
   gender: 'female',
   avatar: '',
   visual_anchor: {
-    preset_name: '',
     role_tags: '',
     body_tags: '',
     appearance_tags: ''
@@ -31,7 +29,6 @@ const emptyProfile = () => ({
 })
 
 const normalizeVisual = (raw) => ({
-  preset_name: '',
   role_tags: '',
   body_tags: '',
   appearance_tags: '',
@@ -63,7 +60,6 @@ export function useCharacter() {
         p.visual_anchor ||
           (p.avatar_role || p.body_type || p.appearance
             ? {
-                preset_name: '',
                 role_tags: p.avatar_role || '',
                 body_tags: p.body_type || '',
                 appearance_tags: p.appearance || ''
@@ -92,7 +88,6 @@ export function useCharacter() {
       gender: profile.gender,
       avatar: profile.avatar,
       visual_anchor: {
-        preset_name: profile.visual_anchor?.preset_name || '',
         role_tags: profile.visual_anchor?.role_tags || '',
         body_tags: profile.visual_anchor?.body_tags || '',
         appearance_tags: profile.visual_anchor?.appearance_tags || ''

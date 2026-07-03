@@ -48,11 +48,7 @@
       </div>
       <div class="form-field">
         <label>头像 emoji</label>
-        <input v-model="form.avatar" />
-      </div>
-      <div class="form-field">
-        <label>皮肤名称</label>
-        <input v-model="form.preset_name" />
+        <input v-model="form.avatar" placeholder="💗" />
       </div>
       <div class="form-field">
         <label>角色锚点标签</label>
@@ -103,7 +99,6 @@ function defaultForm() {
     id: '',
     name: '',
     avatar: '💕',
-    preset_name: '',
     role_tags: '',
     body_tags: '',
     appearance_tags: '',
@@ -143,7 +138,6 @@ async function saveModal() {
     name: form.name || form.id,
     avatar: form.avatar,
     visual_anchor: {
-      preset_name: form.preset_name,
       role_tags: form.role_tags,
       body_tags: form.body_tags,
       appearance_tags: form.appearance_tags,

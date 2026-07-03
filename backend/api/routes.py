@@ -94,7 +94,6 @@ async def switch_char(name: str):
 async def create_char(request: CreateCharacterRequest):
     try:
         visual_anchor = request.visual_anchor or {
-            "preset_name": "",
             "role_tags": request.avatar_role,
             "body_tags": request.body_type,
             "appearance_tags": request.appearance,

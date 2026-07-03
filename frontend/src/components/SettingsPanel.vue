@@ -79,10 +79,6 @@
       <div v-if="activeTab === '皮肤'" class="tab-content">
         <div class="form-card">
           <div class="form-field">
-            <label>皮肤名称</label>
-            <input v-model="profile.visual_anchor.preset_name" placeholder="可选，例如：初音未来皮肤" />
-          </div>
-          <div class="form-field">
             <label>角色锚点标签</label>
             <textarea v-model="profile.visual_anchor.role_tags" rows="2" placeholder="danbooru 角色名或稳定识别标签，例如 hatsune_miku, solo"></textarea>
           </div>
