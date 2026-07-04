@@ -85,7 +85,10 @@ def create_character(name: str, profile: dict):
         save_user_profile(name, profile["user_profile"])
     (memory_dir / "soul.md").write_text(_default_soul(display_name), encoding="utf-8")
     (memory_dir / "long_term.md").write_text(f"# {display_name}的长期记忆\n\n（随对话自然生长）\n", encoding="utf-8")
-    (memory_dir / "status.md").write_text(_default_status(name), encoding="utf-8")
+    (memory_dir / "status.md").write_text(
+        _default_status(name, profile.get("initial_outfit_tags")),
+        encoding="utf-8",
+    )
     (memory_dir / "plans.md").write_text(_default_plans(name), encoding="utf-8")
 
     logger.info(f"角色 '{name}' 创建完成")

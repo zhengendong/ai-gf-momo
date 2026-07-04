@@ -50,6 +50,7 @@
         <label>头像 emoji</label>
         <input v-model="form.avatar" placeholder="💗" />
       </div>
+      <SkinTagAssistant @apply="applySkinMapping" />
       <div class="form-field">
         <label>角色锚点标签</label>
         <textarea v-model="form.role_tags" rows="2"></textarea>
@@ -84,6 +85,13 @@
         <label>用户备注</label>
         <textarea v-model="form.user_notes" rows="3"></textarea>
       </div>
+      <div class="form-field">
+        <label>初始化服饰</label>
+        <textarea v-model="form.initial_outfit_tags" rows="3" placeholder="留空时创建角色会自动生成"></textarea>
+      </div>
+      <button class="secondary-action" @click="generateInitialOutfit" :disabled="outfitGenerating">
+        {{ outfitGenerating ? '生成中...' : 'AI 生成初始化服饰' }}
+      </button>
       <div class="modal-actions">
         <button class="primary" @click="saveModal" :disabled="!form.id">创建</button>
         <button @click="closeModal">取消</button>
@@ -95,6 +103,7 @@
 <script setup>
 import { reactive, ref, watch } from 'vue'
 import { useCharacter } from '../composables/useCharacter.js'
+import SkinTagAssistant from './SkinTagAssistant.vue'
 
 const {
   characters,
@@ -108,6 +117,7 @@ const {
 const profileCache = reactive({})
 const creating = ref(false)
 const openMenuFor = ref('')
+const outfitGenerating = ref(false)
 const form = reactive(defaultForm())
 
 watch(characters, refreshProfiles, { immediate: true, deep: true })
@@ -125,6 +135,7 @@ function defaultForm() {
     user_pet_name: '',
     communication_style: '',
     user_notes: '',
+    initial_outfit_tags: '',
   }
 }
 
@@ -154,6 +165,35 @@ function toggleMenu(id) {
   openMenuFor.value = openMenuFor.value === id ? '' : id
 }
 
+function applySkinMapping(item) {
+  form.role_tags = item.role_tags || ''
+  form.body_tags = item.body_tags || ''
+  form.appearance_tags = item.appearance_tags || ''
+}
+
+async function generateInitialOutfit() {
+  outfitGenerating.value = true
+  try {
+    const r = await fetch('/api/skin-mapping/outfit', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        display_name: form.name || form.id,
+        identity: form.identity,
+        visual_anchor: {
+          role_tags: form.role_tags,
+          body_tags: form.body_tags,
+          appearance_tags: form.appearance_tags,
+        },
+      })
+    })
+    const data = await r.json()
+    form.initial_outfit_tags = (data.outfit_tags || []).join('\n')
+  } finally {
+    outfitGenerating.value = false
+  }
+}
+
 async function saveModal() {
   if (!form.id) return
   await createCharacter(form.id, {
@@ -171,6 +211,8 @@ async function saveModal() {
       communication_style: form.communication_style,
       notes: form.user_notes,
     },
+    initial_outfit_tags: form.initial_outfit_tags,
+    auto_generate_initial_outfit: true,
   })
   closeModal()
   await switchCharacter(form.id)
@@ -356,5 +398,19 @@ async function deleteOne(id) {
   color: #fff;
   border: none;
   background: linear-gradient(135deg, var(--gradient-start), var(--gradient-end));
+}
+.secondary-action {
+  border: 1px solid var(--border-light);
+  background: var(--bg-lighter);
+  border-radius: 6px;
+  padding: 8px 10px;
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text-dark);
+  margin-bottom: 8px;
+}
+.secondary-action:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 </style>

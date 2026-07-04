@@ -101,9 +101,9 @@ AI_gf_momo/
 │   ├── settings.json              # 全局配置（角色、上下文、ComfyUI、心跳、记忆）
 │   └── llm_profiles.example.json  # 多模型配置示例
 │
-├── data/{name}/images/            # 生成图片 + _history.json（按角色分组）
-├── scripts/                       # 诊断 / 烟雾测试 / 探针
-└── docs/                          # ARCHITECTURE / REQUIREMENTS / reference-*
+├── data/
+│   └── char_skin_mapping.json     # IP 角色皮肤标签映射（新建/编辑角色时检索补全）
+└── scripts/                       # 诊断 / 烟雾测试 / 探针
 ```
 
 ## 配置
@@ -149,12 +149,11 @@ LLM 通过结构化字段修改现实状态：
 
 ## 开发参考
 
-- `docs/ARCHITECTURE.md` — 架构演进与目录约定
-- `docs/reference-gf-core.md` — 角色核心概念
-- `docs/reference-gf-memory.md` — 记忆系统
-- `docs/reference-gf-state.md` — 状态机
 - `scripts/contract_smoke.py` — 后端契约烟雾测试
 - `scripts/diagnose_runtime.py` — 运行时诊断
+- `config/agent.md` — 角色对话协议和上下文组织规则
+- `config/photo_rules.md` — 生图触发和照片规则
+- `config/tag_reference.md` — 常用 SD 标签参考
 
 ## 隐私
 

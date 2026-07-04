@@ -79,6 +79,7 @@
 
       <div v-if="activeTab === '皮肤'" class="tab-content">
         <div class="form-card">
+          <SkinTagAssistant @apply="applySkinMapping" />
           <div class="form-field">
             <label>角色锚点标签</label>
             <textarea v-model="profile.visual_anchor.role_tags" rows="2" placeholder="danbooru 角色名或稳定识别标签，例如 hatsune_miku, solo"></textarea>
@@ -227,6 +228,7 @@
 <script setup>
 import { ref, reactive, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useCharacter } from '../composables/useCharacter.js'
+import SkinTagAssistant from './SkinTagAssistant.vue'
 
 const { profile, activeCharId, saveProfile } = useCharacter()
 
@@ -430,6 +432,15 @@ const normalizeMemorySettings = () => {
 const onSaveProfile = async () => {
   await saveProfile()
   showSaved()
+}
+
+const applySkinMapping = (item) => {
+  if (!profile.visual_anchor) {
+    profile.visual_anchor = { role_tags: '', body_tags: '', appearance_tags: '' }
+  }
+  profile.visual_anchor.role_tags = item.role_tags || ''
+  profile.visual_anchor.body_tags = item.body_tags || ''
+  profile.visual_anchor.appearance_tags = item.appearance_tags || ''
 }
 
 const saveSkin = async () => {

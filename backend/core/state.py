@@ -209,18 +209,37 @@ def _deep_merge_markdown(character: str, current_text: str, updates: dict) -> st
     return result
 
 
-def _default_status(character: str = "momo") -> str:
+def _coerce_outfit_tags(outfit_tags=None) -> str:
+    if outfit_tags is None:
+        tags = [
+            "white_shirt",
+            "black_pleated_skirt",
+            "black_mary_jane_shoes",
+            "white_thighhighs",
+            "silver_heart_necklace",
+            "black_bell_collar",
+        ]
+    elif isinstance(outfit_tags, str):
+        tags = []
+        for line in outfit_tags.replace(",", "\n").splitlines():
+            tag = line.strip()
+            if tag.startswith("-"):
+                tag = tag[1:].strip()
+            if tag:
+                tags.append(tag)
+    else:
+        tags = [str(tag).strip() for tag in outfit_tags if str(tag).strip()]
+    return normalize_outfit_markdown(tags)
+
+
+def _default_status(character: str = "momo", outfit_tags=None) -> str:
     """默认状态"""
     char_name = _character_name(character)
+    outfit = _coerce_outfit_tags(outfit_tags)
     return f"""# {char_name}的状态
 
 ## 穿着
-- white_shirt
-- black_pleated_skirt
-- black_mary_jane_shoes
-- white_thighhighs
-- silver_heart_necklace
-- black_bell_collar
+{outfit}
 
 ## 场景细节
 - bedroom

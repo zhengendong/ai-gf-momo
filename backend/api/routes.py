@@ -1,7 +1,9 @@
 """REST API routes for settings, characters, memory, and chat history."""
 
+import hashlib
 import json
 import logging
+import re
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -21,6 +23,8 @@ from ..core.characters import (
     update_profile,
 )
 from ..services.llm import llm_service
+from ..core.outfit_state import normalize_outfit_tags
+from ..core.skin_mapping import search_skin_mappings
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -75,6 +79,30 @@ class CreateCharacterRequest(BaseModel):
     visual_anchor: dict = None
     identity: str = ""
     user_profile: dict = None
+    initial_outfit_tags: list[str] | str | None = None
+    auto_generate_initial_outfit: bool = True
+
+
+class OutfitGenerateRequest(BaseModel):
+    display_name: str = ""
+    identity: str = ""
+    visual_anchor: dict = None
+    skin_match: dict = None
+
+
+@router.get("/skin-mapping/search")
+async def search_skin_mapping(q: str = "", limit: int = 20):
+    return {"results": search_skin_mappings(q, limit=limit)}
+
+
+@router.post("/skin-mapping/outfit")
+async def generate_skin_outfit(request: OutfitGenerateRequest):
+    return await _generate_initial_outfit(
+        request.display_name,
+        request.visual_anchor or {},
+        request.identity or "",
+        request.skin_match or {},
+    )
 
 
 @router.get("/characters")
@@ -99,6 +127,15 @@ async def create_char(request: CreateCharacterRequest):
             "body_tags": request.body_type,
             "appearance_tags": request.appearance,
         }
+        initial_outfit_tags = _clean_outfit_tags(request.initial_outfit_tags)
+        if not initial_outfit_tags and request.auto_generate_initial_outfit:
+            generated = await _generate_initial_outfit(
+                request.display_name or request.name,
+                visual_anchor,
+                request.identity,
+                {},
+            )
+            initial_outfit_tags = generated["outfit_tags"]
         # 皮肤信息只落 visual_anchor（profile.json 里只有这一份真相）。
         # avatar_role / body_type / appearance / gender 都不再回写到 profile.json 顶层。
         create_character(request.name, {
@@ -108,10 +145,130 @@ async def create_char(request: CreateCharacterRequest):
             "visual_anchor": visual_anchor,
             "identity": request.identity,
             "user_profile": request.user_profile,
+            "initial_outfit_tags": initial_outfit_tags,
         })
         return {"status": "ok", "name": request.name}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+async def _generate_initial_outfit(
+    display_name: str,
+    visual_anchor: dict,
+    identity: str = "",
+    skin_match: dict | None = None,
+) -> dict:
+    skin_match = skin_match or {}
+    fallback = _fallback_outfit(display_name, visual_anchor, identity, skin_match)
+    system = """You generate Stable Diffusion / Danbooru outfit tags for anime character initialization.
+Return only JSON. The outfit must be safe for a normal first appearance, coherent, and not nude.
+Use English lowercase tags with underscores. Do not include body, hair, eye, pose, scene, rating, or character name tags."""
+    user = {
+        "display_name": display_name,
+        "identity": identity,
+        "visual_anchor": visual_anchor,
+        "matched_skin": skin_match,
+        "output_schema": {
+            "outfit_tags": ["tag1", "tag2", "tag3"],
+            "reason": "short Chinese reason",
+        },
+        "rules": [
+            "Return 4 to 8 outfit/accessory tags.",
+            "Tags should work as comma-separated Danbooru tags.",
+            "Avoid explicit nudity and underwear-only outfits.",
+            "Prefer a signature outfit that fits the character identity and visual style.",
+        ],
+    }
+    try:
+        raw = await llm_service.chat_prompt(system, json.dumps(user, ensure_ascii=False), temperature=0.7, max_tokens=512)
+        data = _extract_json_object(raw)
+        tags = _clean_outfit_tags(data.get("outfit_tags"))
+        if tags:
+            return {
+                "outfit_tags": tags,
+                "source": "ai",
+                "reason": str(data.get("reason") or "").strip(),
+            }
+    except Exception as e:
+        logger.warning("AI initial outfit generation failed, using fallback: %s", e)
+    return {
+        "outfit_tags": fallback,
+        "source": "fallback",
+        "reason": "AI 未返回可用服饰，已使用本地预设兜底。",
+    }
+
+
+def _extract_json_object(text: str) -> dict:
+    text = (text or "").strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+    try:
+        return json.loads(text)
+    except Exception:
+        match = re.search(r"\{.*\}", text, re.DOTALL)
+        if not match:
+            return {}
+        try:
+            return json.loads(match.group(0))
+        except Exception:
+            return {}
+
+
+def _clean_outfit_tags(value) -> list[str]:
+    if not value:
+        return []
+    if isinstance(value, str):
+        raw = re.split(r"[,\n]", value)
+    elif isinstance(value, list):
+        raw = value
+    else:
+        return []
+
+    tags = []
+    blocked = {
+        "nude",
+        "naked",
+        "bare_body",
+        "completely_nude",
+        "topless",
+        "bottomless",
+        "no_bra",
+        "no_panties",
+    }
+    for item in raw:
+        tag = str(item).strip().lower().replace(" ", "_")
+        tag = tag[1:].strip() if tag.startswith("-") else tag
+        if not tag or tag in blocked:
+            continue
+        if any("\u4e00" <= ch <= "\u9fff" for ch in tag):
+            continue
+        if not re.fullmatch(r"[a-z0-9_:\-]+", tag):
+            continue
+        if len(tag) > 48:
+            continue
+        if tag not in tags:
+            tags.append(tag)
+    return normalize_outfit_tags(tags)[:10]
+
+
+def _fallback_outfit(display_name: str, visual_anchor: dict, identity: str, skin_match: dict) -> list[str]:
+    presets = [
+        ["casual_dress", "cardigan", "ankle_boots", "hair_ribbon"],
+        ["sailor_uniform", "pleated_skirt", "loafers", "knee_socks"],
+        ["oversized_hoodie", "shorts", "sneakers", "choker"],
+        ["white_blouse", "high_waist_skirt", "mary_jane_shoes", "ribbon"],
+        ["summer_dress", "sandals", "bracelet", "straw_hat"],
+        ["black_dress", "high_heels", "pearl_necklace", "earrings"],
+    ]
+    seed = "|".join([
+        display_name or "",
+        json.dumps(visual_anchor or {}, ensure_ascii=False, sort_keys=True),
+        identity or "",
+        json.dumps(skin_match or {}, ensure_ascii=False, sort_keys=True),
+    ])
+    idx = int(hashlib.sha256(seed.encode("utf-8")).hexdigest()[:8], 16) % len(presets)
+    return presets[idx]
 
 
 @router.delete("/characters/{name}")
