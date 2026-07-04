@@ -4,7 +4,8 @@
       <span class="dot" :class="{ online: isConnected }"></span>
       <span class="char-name">{{ characterAvatar }} {{ characterName }}</span>
       <span class="sep">|</span>
-      <span v-if="imageStatus === 'generating'" class="hint">📷 拍照中...</span>
+      <span v-if="statusUpdate" class="hint">{{ statusUpdate }}</span>
+      <span v-else-if="imageStatus === 'generating'" class="hint">📷 拍照中...</span>
       <span v-else class="hint">在线</span>
     </div>
     <div class="right">
@@ -20,6 +21,7 @@
 defineProps({
   isConnected: Boolean,
   imageStatus: String,
+  statusUpdate: String,
   characterName: String,
   characterAvatar: String,
   characters: Array,

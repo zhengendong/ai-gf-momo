@@ -1,0 +1,20 @@
+{
+  "turns_since_condense": 14,
+  "compressed_message_count": 13,
+  "long_term_turns_since_condense": 14,
+  "soul_turns_since_condense": 14,
+  "last_turn_at": "2026-07-04T03:32:19.800331+00:00",
+  "last_compressed_at": "2026-07-03T11:06:37.984325+00:00",
+  "last_condense_trigger": "manual_api",
+  "last_condense_at": "2026-07-04T03:03:40.439972+00:00",
+  "condense_in_progress": false,
+  "soul_last_condense_trigger": "turn_interval",
+  "soul_last_condense_at": "2026-07-04T03:02:45.164457+00:00",
+  "soul_condense_in_progress": false,
+  "long_term_last_condense_trigger": "manual_api",
+  "long_term_last_condense_started_at": "2026-07-04T03:02:24.801632+00:00",
+  "long_term_condense_in_progress": false,
+  "soul_last_condense_started_at": "2026-07-04T03:02:24.801632+00:00",
+  "last_condense_started_at": "2026-07-04T03:02:24.801632+00:00",
+  "long_term_last_condense_at": "2026-07-04T03:03:40.439972+00:00"
+}

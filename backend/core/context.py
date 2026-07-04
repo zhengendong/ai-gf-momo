@@ -114,6 +114,46 @@ def load_photo_rules() -> str:
     return ""
 
 
+def should_include_photo_rules(user_message: str, chat_history: str = "") -> bool:
+    """Only expand bulky photo rules when the current turn may need them."""
+    text = f"{user_message}\n{chat_history[-800:] if chat_history else ''}".lower()
+    triggers = (
+        "照片",
+        "图片",
+        "拍",
+        "看",
+        "换",
+        "换衣",
+        "换一套",
+        "去换",
+        "穿",
+        "脱",
+        "衣服",
+        "裙",
+        "裤",
+        "袜",
+        "鞋",
+        "卧室",
+        "浴室",
+        "床",
+        "沙发",
+        "坐",
+        "躺",
+        "站",
+        "脚",
+        "腿",
+        "胸",
+        "脸",
+        "近一点",
+        "全身",
+        "rating:",
+        "photo",
+        "image",
+        "prompt",
+    )
+    return any(trigger in text for trigger in triggers)
+
+
 def load_conversation_summary(character: str) -> str:
     """加载对话摘要（如有）"""
     path = settings.get_memory_dir(character) / "conversation_summary.md"
@@ -152,7 +192,8 @@ def assemble_momo_prompt(
     long_term = load_long_term(character)
     status = load_status(character)
     plans = load_plans(character)
-    photo_rules = load_photo_rules()
+    include_photo_rules = should_include_photo_rules(user_message, chat_history)
+    photo_rules = load_photo_rules() if include_photo_rules else ""
     char_name = profile.get("name", character)
     user_profile = render_user_profile(character)
     user_pet_name = get_user_pet_name(character)
@@ -181,7 +222,7 @@ def assemble_momo_prompt(
         plans or "（未填写）",
         "",
         "## 5.1 photo_rules.md（拍照、服饰、NSFW 状态规则）",
-        photo_rules or "（未填写）",
+        photo_rules or "本轮未展开完整拍照规则。若需要生图，photo_prompt 只写动作/表情/镜头/rating/画质；服饰和稳定场景必须通过 state_updates.status 更新，由工具层注入。",
         "",
         "## 6. soul.md（慢变化人格层）",
         soul or "（未填写）",
@@ -192,17 +233,17 @@ def assemble_momo_prompt(
 
     # 对话摘要（压缩后的旧对话）
     if conversation_summary:
-        parts.append("## 8. conversation_summary.md（旧对话摘要，低优先级）")
+        parts.append("## 8. 历史对话摘要（conversation_summary.md）")
         parts.append(conversation_summary)
 
     # 最近对话历史
     if chat_history:
-        parts.append("## 9. 最近对话（低优先级）")
+        parts.append("## 9. 最近对话（chat_history）")
         parts.append(chat_history)
 
     if recalled_memories:
-        parts.append("## 10. 向量召回（仅用于回答当前用户要求查找的历史细节）")
-        parts.append("以下内容来自当前角色的历史对话向量库，不能覆盖 identity/user/status/plans/long_term/soul。")
+        parts.append("## 10. 向量召回（vector_recall，相关历史记录）")
+        parts.append("以下是检索到的与当前话题相关的过往对话记录。")
         parts.append(recalled_memories)
 
     # 用户消息

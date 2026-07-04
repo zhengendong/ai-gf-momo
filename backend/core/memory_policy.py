@@ -13,8 +13,8 @@ from pathlib import Path
 
 from ..config import settings
 from .chat_history import read_chat_history
-from .compressor import compress_conversation, estimate_tokens
-from .context import load_conversation_summary, load_long_term, save_conversation_summary
+from .compressor import estimate_tokens
+from .context import load_conversation_summary, load_long_term
 from .memory_v3 import filter_recalled_memories, should_recall_vector_memory
 from .vector_store import MAX_VECTORS, VectorStore
 
@@ -23,11 +23,18 @@ logger = logging.getLogger(__name__)
 DEFAULT_MEMORY_SETTINGS = {
     "condensation_days": 1,
     "retention_days": 30,
-    "turns_per_condense": 15,
+    "long_term_turns_per_condense": 15,
+    "soul_turns_per_condense": 15,
     "vector_recall_enabled": True,
     "vector_top_k": 5,
     "vector_max_distance": 0.55,
 }
+
+CONDENSE_TARGETS = ("long_term", "soul")
+
+MIN_CONTEXT_TOKENS = 8000
+DEFAULT_CONTEXT_TOKENS = 16000
+MIN_RECENT_MESSAGES = 12
 
 
 def load_settings_json() -> dict:
@@ -42,13 +49,20 @@ def load_settings_json() -> dict:
 
 def memory_settings() -> dict:
     raw = load_settings_json().get("memory", {})
-    return {**DEFAULT_MEMORY_SETTINGS, **(raw or {})}
+    merged = {**DEFAULT_MEMORY_SETTINGS, **(raw or {})}
+    legacy_interval = int(merged.get("turns_per_condense") or 0)
+    if "long_term_turns_per_condense" not in (raw or {}) and legacy_interval:
+        merged["long_term_turns_per_condense"] = legacy_interval
+    if "soul_turns_per_condense" not in (raw or {}) and legacy_interval:
+        merged["soul_turns_per_condense"] = legacy_interval
+    return merged
 
 
 def context_settings() -> dict:
     raw = load_settings_json().get("context", {})
+    configured_max = int(raw.get("max_tokens", DEFAULT_CONTEXT_TOKENS) or DEFAULT_CONTEXT_TOKENS)
     return {
-        "max_tokens": int(raw.get("max_tokens", 8000) or 8000),
+        "max_tokens": max(MIN_CONTEXT_TOKENS, configured_max),
         "compress_at": float(raw.get("compress_at", 0.9) or 0.9),
     }
 
@@ -59,13 +73,25 @@ def runtime_state_path(character: str) -> Path:
 
 def load_runtime_state(character: str) -> dict:
     path = runtime_state_path(character)
+    base = {
+        "turns_since_condense": 0,
+        "compressed_message_count": 0,
+        "long_term_turns_since_condense": 0,
+        "soul_turns_since_condense": 0,
+    }
     if not path.exists():
-        return {"turns_since_condense": 0, "compressed_message_count": 0}
+        return base
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-        return {"turns_since_condense": 0, "compressed_message_count": 0, **data}
+        state = {**base, **data}
+        legacy_turns = int(state.get("turns_since_condense") or 0)
+        for target in CONDENSE_TARGETS:
+            key = f"{target}_turns_since_condense"
+            if not state.get(key) and legacy_turns:
+                state[key] = legacy_turns
+        return state
     except Exception:
-        return {"turns_since_condense": 0, "compressed_message_count": 0}
+        return base
 
 
 def save_runtime_state(character: str, data: dict):
@@ -74,28 +100,89 @@ def save_runtime_state(character: str, data: dict):
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def bump_turn_and_should_condense(character: str) -> bool:
+def bump_turn_and_due_targets(character: str) -> list[str]:
     cfg = memory_settings()
-    interval = int(cfg.get("turns_per_condense") or 0)
-    if interval <= 0:
-        return False
     state = load_runtime_state(character)
-    state["turns_since_condense"] = int(state.get("turns_since_condense") or 0) + 1
     state["last_turn_at"] = datetime.now(timezone.utc).isoformat()
-    should = state["turns_since_condense"] >= interval
-    if should:
-        state["turns_since_condense"] = 0
+    state["turns_since_condense"] = int(state.get("turns_since_condense") or 0) + 1
+
+    due_targets = []
+    for target in CONDENSE_TARGETS:
+        interval = int(cfg.get(f"{target}_turns_per_condense") or 0)
+        key = f"{target}_turns_since_condense"
+        state[key] = int(state.get(key) or 0) + 1
+        if interval <= 0 or state.get(f"{target}_condense_in_progress"):
+            continue
+        if state[key] >= interval:
+            state[f"{target}_last_condense_trigger"] = "turn_interval"
+            state[f"{target}_last_condense_started_at"] = state["last_turn_at"]
+            state[f"{target}_condense_in_progress"] = True
+            due_targets.append(target)
+
+    if due_targets:
         state["last_condense_trigger"] = "turn_interval"
-        state["last_condense_at"] = state["last_turn_at"]
+        state["last_condense_started_at"] = state["last_turn_at"]
+        state["condense_in_progress"] = True
     save_runtime_state(character, state)
-    return should
+    return due_targets
 
 
-def reset_condense_counter(character: str, trigger: str = "manual"):
+def bump_turn_and_should_condense(character: str) -> bool:
+    return bool(bump_turn_and_due_targets(character))
+
+
+def normalize_condense_target(target: str | None) -> str:
+    value = (target or "all").strip()
+    if value in ("memory", "long-term", "longterm"):
+        return "long_term"
+    if value in (*CONDENSE_TARGETS, "all"):
+        return value
+    return "all"
+
+
+def condense_targets_for(target: str | None) -> tuple[str, ...]:
+    normalized = normalize_condense_target(target)
+    if normalized == "all":
+        return CONDENSE_TARGETS
+    return (normalized,)
+
+
+def reset_condense_counter(character: str, trigger: str = "manual", target: str = "all"):
     state = load_runtime_state(character)
-    state["turns_since_condense"] = 0
+    now = datetime.now(timezone.utc).isoformat()
+    for item in condense_targets_for(target):
+        state[f"{item}_turns_since_condense"] = 0
+        state[f"{item}_last_condense_trigger"] = trigger
+        state[f"{item}_last_condense_at"] = now
+        state[f"{item}_condense_in_progress"] = False
+        state.pop(f"{item}_last_condense_error", None)
+    if target in ("all", None):
+        state["turns_since_condense"] = 0
     state["last_condense_trigger"] = trigger
-    state["last_condense_at"] = datetime.now(timezone.utc).isoformat()
+    state["last_condense_at"] = now
+    state["condense_in_progress"] = any(
+        state.get(f"{item}_condense_in_progress") for item in CONDENSE_TARGETS
+    )
+    state.pop("last_condense_error", None)
+    save_runtime_state(character, state)
+
+
+def mark_condense_failed(character: str, trigger: str = "manual", error: str = "", target: str = "all"):
+    state = load_runtime_state(character)
+    now = datetime.now(timezone.utc).isoformat()
+    for item in condense_targets_for(target):
+        state[f"{item}_last_condense_trigger"] = trigger
+        state[f"{item}_last_condense_failed_at"] = now
+        state[f"{item}_condense_in_progress"] = False
+        if error:
+            state[f"{item}_last_condense_error"] = error[:500]
+    state["last_condense_trigger"] = trigger
+    state["last_condense_failed_at"] = now
+    state["condense_in_progress"] = any(
+        state.get(f"{item}_condense_in_progress") for item in CONDENSE_TARGETS
+    )
+    if error:
+        state["last_condense_error"] = error[:500]
     save_runtime_state(character, state)
 
 
@@ -201,7 +288,7 @@ async def build_context_window(
     base_prompt: str,
     system_prompt: str,
 ) -> tuple[str, str]:
-    """Build summary + recent chat, compressing older turns at the configured limit."""
+    """Build summary + recent chat without blocking the live reply on summarization."""
     cfg = context_settings()
     max_tokens = cfg["max_tokens"]
     threshold = cfg["compress_at"]
@@ -226,23 +313,18 @@ async def build_context_window(
         candidate = [msg] + recent
         chat_history = format_chat_messages(candidate, char_name, user_label)
         total = estimate_tokens(system_prompt + base_prompt + (summary or "") + chat_history)
-        if total > limit_tokens and recent:
+        if total > limit_tokens and len(recent) >= MIN_RECENT_MESSAGES:
             break
         recent = candidate
 
     old_count = max(0, len(messages) - len(recent))
-    if old_count <= 0:
-        return summary, format_chat_messages(recent, char_name, user_label)
-
-    old_text = format_chat_messages(messages[:old_count], char_name, user_label)
-    if old_text.strip():
-        new_summary = await compress_conversation(llm_client, summary, old_text)
-        if new_summary and new_summary.strip() != (summary or "").strip():
-            save_conversation_summary(character, new_summary)
-            summary = new_summary
-            state["compressed_message_count"] = compressed_count + old_count
-            state["last_compressed_at"] = datetime.now(timezone.utc).isoformat()
-            save_runtime_state(character, state)
-            logger.info("Conversation summary compressed for %s (%s old messages)", character, old_count)
+    if old_count > 0:
+        logger.info(
+            "Context window trimmed for %s: recent=%s old=%s max_tokens=%s",
+            character,
+            len(recent),
+            old_count,
+            max_tokens,
+        )
 
     return summary, format_chat_messages(recent, char_name, user_label)

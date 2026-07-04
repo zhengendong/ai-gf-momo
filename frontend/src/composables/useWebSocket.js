@@ -93,6 +93,10 @@ export function useWebSocket() {
 
         } else if (data.type === 'status_update') {
           statusUpdate.value = data.content
+          const content = String(data.content || '')
+          if (typeof window !== 'undefined' && (content.includes('记忆') || content.includes('灵魂'))) {
+            window.dispatchEvent(new CustomEvent('memory-status-update', { detail: data.content }))
+          }
 
         } else if (data.type === 'done') {
           const lastMsg = messages.value[messages.value.length - 1]
@@ -130,8 +134,8 @@ export function useWebSocket() {
     }
   }
 
-  const refreshMemory = (characterId = '') => {
-    sendMessage({ type: 'refresh_memory', character_id: characterId })
+  const refreshMemory = (characterId = '', target = 'all') => {
+    sendMessage({ type: 'refresh_memory', character_id: characterId, target })
   }
 
   const syncCharacter = (characterId = '') => {

@@ -31,6 +31,8 @@ const DISPLAY_SECTIONS = [
   { key: 'outfit', label: '穿着' },
   { key: 'scene', label: '场景细节' },
   { key: 'mood', label: '心情状态' },
+  { key: 'shortPlans', label: '短期计划' },
+  { key: 'longPlans', label: '长期计划' },
   { key: 'goal', label: '当前目标' },
   { key: 'todo', label: '想做的事' },
 ]
@@ -44,6 +46,8 @@ const visibleSections = computed(() => {
     outfit: all['穿着'],
     scene: all['场景细节'],
     mood: findMood(all),
+    shortPlans: all['短期计划'],
+    longPlans: all['长期计划'],
     goal: all['当前目标'],
     todo: all['想做的事'],
   }

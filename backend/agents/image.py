@@ -17,7 +17,7 @@ class ImagePipeline:
         self.manager = ws_manager
         self.tool = ImageTool(comfyui_service)
 
-    async def generate(self, session_id: str, photo_prompt: str, character: str):
+    async def generate(self, session_id: str, photo_prompt: str, character: str, reply: str = ""):
         try:
             await self._push(
                 session_id,
@@ -33,6 +33,7 @@ class ImagePipeline:
             workflow, prompt_used = self.tool.build_workflow(
                 character=character,
                 prompt=photo_prompt,
+                reply=reply,
             )
 
             await self._push(

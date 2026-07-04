@@ -23,13 +23,14 @@ class ImageTool:
         self,
         character: str,
         prompt: str,
+        reply: str = "",
         width: int = None,
         height: int = None,
         workflow_name: str = None,
         negative_prompt: str = "",
     ) -> tuple[dict, str]:
         """构建 ComfyUI workflow，返回 workflow 和实际使用的最终 prompt。"""
-        final_prompt = build_image_prompt(character, prompt)
+        final_prompt = build_image_prompt(character, prompt, reply=reply)
         workflow = self.comfyui.build_workflow_from_template(
             prompt=final_prompt,
             negative_prompt=negative_prompt,
@@ -46,6 +47,7 @@ class ImageTool:
         self,
         character: str,
         prompt: str,
+        reply: str = "",
         width: int = None,
         height: int = None,
         workflow_name: str = None,
@@ -64,6 +66,7 @@ class ImageTool:
         workflow, prompt_used = self.build_workflow(
             character=character,
             prompt=prompt,
+            reply=reply,
             width=width,
             height=height,
             workflow_name=workflow_name,

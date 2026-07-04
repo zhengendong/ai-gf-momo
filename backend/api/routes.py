@@ -224,14 +224,48 @@ async def update_char_long_term(name: str, body: TextUpdate):
     return {"status": "ok"}
 
 
+@router.get("/characters/{name}/soul")
+async def get_char_soul(name: str):
+    migrate_character_assets(name)
+    path = settings.get_memory_dir(name) / "soul.md"
+    if not path.exists():
+        return {"content": ""}
+    return {"content": path.read_text(encoding="utf-8")}
+
+
+@router.put("/characters/{name}/soul")
+async def update_char_soul(name: str, body: TextUpdate):
+    migrate_character_assets(name)
+    path = settings.get_memory_dir(name) / "soul.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body.content, encoding="utf-8")
+    return {"status": "ok"}
+
+
 @router.post("/memory/condense")
-async def trigger_condensation(character: str = None, days: int = 1):
+async def trigger_condensation(character: str = None, days: int = 1, target: str = "all"):
     char = character or get_active()
     agent = MemoryAgent(llm_service)
-    result = await agent.condense(char, days)
-    from ..core.memory_policy import reset_condense_counter
-    reset_condense_counter(char, trigger="manual_api")
-    return {"status": "ok", "character": char, "result": result}
+    result = await agent.condense(char, days, target=target)
+    from ..core.memory_policy import mark_condense_failed, reset_condense_counter
+
+    normalized = "long_term" if target in ("memory", "long-term", "longterm") else target
+    if normalized == "long_term":
+        has_update = bool(isinstance(result, dict) and (result.get("long_term") or "").strip())
+    elif normalized == "soul":
+        has_update = bool(isinstance(result, dict) and (result.get("soul") or "").strip())
+    else:
+        has_update = bool(
+            isinstance(result, dict)
+            and ((result.get("soul") or "").strip() or (result.get("long_term") or "").strip())
+        )
+    if has_update:
+        reset_condense_counter(char, trigger="manual_api", target=target)
+        status = "ok"
+    else:
+        mark_condense_failed(char, trigger="manual_api", error="empty_result", target=target)
+        status = "empty"
+    return {"status": status, "character": char, "result": result}
 
 
 @router.get("/memory/status")

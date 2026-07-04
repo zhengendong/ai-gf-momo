@@ -37,6 +37,54 @@ ACCESSORY_HINTS = (
     "glasses",
 )
 
+CLOTHING_HINTS = (
+    "shirt",
+    "blouse",
+    "sweater",
+    "hoodie",
+    "jacket",
+    "coat",
+    "dress",
+    "skirt",
+    "shorts",
+    "pants",
+    "jeans",
+    "bra",
+    "panties",
+    "lingerie",
+    "bikini",
+    "swimsuit",
+    "uniform",
+    "apron",
+    "shoe",
+    "shoes",
+    "boot",
+    "boots",
+    "sneaker",
+    "sneakers",
+    "sandal",
+    "sandals",
+    "mary_jane",
+    "loafers",
+    "heels",
+    "sock",
+    "socks",
+    "thighhigh",
+    "thighhighs",
+    "stocking",
+    "stockings",
+    "pantyhose",
+    "tights",
+    "collar",
+    "choker",
+    "necklace",
+    "ribbon",
+    "hair_ornament",
+    "glasses",
+    "hat",
+    "cap",
+)
+
 CONFLICT_GROUPS = {
     "body_pose": {
         "standing",
@@ -68,6 +116,33 @@ CONFLICT_GROUPS = {
         "side_view",
     },
 }
+
+POSE_OVERRIDE_TAGS = {
+    "standing",
+    "sitting",
+    "sitting_on_bed",
+    "sitting_on_chair",
+    "sitting_on_floor",
+    "seiza",
+    "lying",
+    "lying_down",
+    "lying_on_bed",
+    "lying_down_on_bed",
+    "prone",
+    "on_stomach",
+    "kneeling",
+    "on_all_fours",
+    "all_fours",
+    "crouching",
+    "squatting",
+}
+
+REPLY_POSE_OVERRIDES = (
+    ("standing", ("站着", "站起", "站起来", "站在", "站到", "站好", "站直")),
+    ("sitting", ("坐着", "坐下", "坐在", "坐到", "坐回", "坐好")),
+    ("on_stomach", ("趴着", "趴下", "趴在", "趴好")),
+    ("lying_down", ("躺着", "躺下", "躺在", "躺到", "躺好")),
+)
 
 CAMERA_ACTION_RULES = [
     {
@@ -264,6 +339,27 @@ def normalize_prompt(prompt: str) -> str:
     return ", ".join(_dedupe_tags(tags))
 
 
+def sanitize_dynamic_photo_prompt(prompt: str) -> str:
+    """
+    Remove persistent outfit tags from the LLM-provided photo prompt.
+
+    status.md is the single source of truth for clothing. The Agent may still
+    mention clothes in photo_prompt, especially after old prompts or repairs;
+    stripping them here prevents "two outfits" from reaching ComfyUI.
+    """
+    kept = []
+    removed = []
+    for tag in _split_prompt_tags(prompt or ""):
+        norm = _norm_tag(tag)
+        if _is_persistent_outfit_prompt_tag(norm):
+            removed.append(tag)
+            continue
+        kept.append(tag)
+    if removed:
+        logger.info("已从 photo_prompt 移除服饰/持久身体状态标签: %s", removed)
+    return ", ".join(_dedupe_tags(kept))
+
+
 def normalize_camera_action_tags(prompt: str) -> str:
     """补齐视角/动作必需标签，并删除明显冲突标签。"""
     tags = _dedupe_tags(_split_prompt_tags(prompt))
@@ -287,6 +383,42 @@ def normalize_camera_action_tags(prompt: str) -> str:
         logger.info(f"已应用视角/动作规则: {rule['name']}")
 
     return ", ".join(tags)
+
+
+def harmonize_pose_from_reply(prompt: str, reply: str | None = None) -> str:
+    """Lightly replace only the explicit body pose tags when reply is clear.
+
+    This never cancels image generation and never calls the LLM. It preserves
+    the model's prompt, replacing only simple conflicting pose tags for the
+    currently supported reply poses: standing, sitting, prone/on_stomach, lying.
+    """
+    desired = _reply_pose_override(reply or "")
+    if not desired:
+        return prompt
+
+    tags = _split_prompt_tags(prompt)
+    kept = [tag for tag in tags if _norm_tag(tag) not in POSE_OVERRIDE_TAGS]
+    if desired not in {_norm_tag(tag) for tag in kept}:
+        kept.append(desired)
+    logger.info("已按回复姿势轻量替换 prompt 姿势: %s", desired)
+    return ", ".join(_dedupe_tags(kept))
+
+
+def _reply_pose_override(reply: str) -> str | None:
+    text = reply or ""
+    for tag, patterns in REPLY_POSE_OVERRIDES:
+        for pattern in patterns:
+            if pattern in text and not _is_negated_reply_pose(text, pattern):
+                return tag
+    return None
+
+
+def _is_negated_reply_pose(text: str, pattern: str) -> bool:
+    idx = text.find(pattern)
+    if idx < 0:
+        return False
+    window = text[max(0, idx - 4):idx + len(pattern) + 2]
+    return any(mark in window for mark in ("不是", "不再", "没有", "别", "不要"))
 
 
 def _split_prompt_tags(prompt: str) -> list[str]:
@@ -338,6 +470,21 @@ def _is_accessory_tag(tag: str) -> bool:
     return any(hint in tag.lower() for hint in ACCESSORY_HINTS)
 
 
+def _is_persistent_outfit_prompt_tag(norm_tag: str) -> bool:
+    if norm_tag in EXPLICIT_NUDE_TAGS:
+        return True
+    if norm_tag in {
+        "barefoot",
+        "topless",
+        "bottomless",
+        "no_bra",
+        "no_panties",
+        "naked_apron",
+    }:
+        return True
+    return any(hint in norm_tag for hint in CLOTHING_HINTS)
+
+
 def _resolve_clothing_conflicts(tags: list[str]) -> list[str]:
     """
     status 同时出现 completely_nude 和普通衣物时，优先相信 nude，只保留饰品。
@@ -376,12 +523,13 @@ def _harmonize_rating(prompt: str) -> str:
     return ", ".join(fixed)
 
 
-def build_image_prompt(character: str, prompt: str) -> str:
+def build_image_prompt(character: str, prompt: str, reply: str | None = None) -> str:
     """
     构建最终生图 prompt。
 
     LLM 只负责本轮拍照意图/局部标签；这里统一补齐角色视觉锚点和当前服饰状态。
     """
+    prompt = sanitize_dynamic_photo_prompt(prompt)
     visual_anchor = get_visual_anchor_tags(character)
     avatar_role = visual_anchor["role_tags"]
     body_type = visual_anchor["body_tags"]
@@ -402,8 +550,11 @@ def build_image_prompt(character: str, prompt: str) -> str:
     clothing_tags = get_clothing_tags(character)
     parts = [p for p in [char_tags, prompt, scene_tags, clothing_tags] if p]
     final_prompt = normalize_prompt(
-        normalize_camera_action_tags(
-            _harmonize_rating(", ".join(parts))
+        harmonize_pose_from_reply(
+            normalize_camera_action_tags(
+                _harmonize_rating(", ".join(parts))
+            ),
+            reply,
         )
     )
     logger.info(f"最终生图 prompt 已构建: character={character}, {len(final_prompt)} 字符")

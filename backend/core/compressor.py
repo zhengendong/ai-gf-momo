@@ -4,6 +4,7 @@
 """
 
 import logging
+import re
 from typing import Optional
 
 from ..config import settings
@@ -11,17 +12,24 @@ from ..config import settings
 logger = logging.getLogger(__name__)
 
 
+def strip_model_thinking(text: str) -> str:
+    """Remove provider reasoning blocks before persisting summaries or replies."""
+    if not text:
+        return ""
+    return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+
+
 def estimate_tokens(text: str) -> int:
     """
-    估算文本 token 数
-    简单估算：中文约 1.5 字符/token，英文约 4 字符/token
-    取粗估值：总字符数 / 2
+    估算文本 token 数。
+    中文约 1.5 字符/token，英文约 4 字符/token
+    和前端"上下文窗口(K)"单位一致。
     """
     if not text:
         return 0
-    return len(text) // 2
-
-
+    chinese = sum(1 for c in text if "\u4e00" <= c <= "\u9fff" or "\u3400" <= c <= "\u4dbf")
+    others = len(text) - chinese
+    return int(chinese * 1.5 + others * 0.3)
 def needs_compression(total_tokens: int, max_tokens: int = None, threshold: float = None) -> bool:
     """
     判断是否需要压缩
@@ -78,7 +86,7 @@ async def compress_conversation(
 
     try:
         response = await llm_client.chat_prompt(system=system, user=user)
-        return response.strip()
+        return strip_model_thinking(response)
     except Exception as e:
         logger.error(f"压缩对话失败: {e}")
         return old_summary

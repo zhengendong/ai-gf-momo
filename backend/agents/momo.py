@@ -8,8 +8,8 @@ import logging
 from typing import Optional
 
 from ..models.schemas import AgentOutput
-from ..core.context import assemble_momo_prompt, get_character_name, save_conversation_summary
-from ..core.compressor import estimate_tokens, needs_compression, compress_conversation
+from ..core.context import assemble_momo_prompt, get_character_name
+from ..core.compressor import estimate_tokens, needs_compression
 from ..core.characters import get_active
 from ..utils.helpers import read_markdown
 
@@ -85,16 +85,10 @@ class MomoAgent:
         )
         total_tokens = estimate_tokens(system_prompt + prompt)
 
-        # 2. 如果需要压缩，压缩后重新组装
+        # 2. build_context_window already trims recent history before this point.
+        # Do not run another LLM summarization in the live reply path.
         if needs_compression(total_tokens):
-            logger.info(f"上下文接近上限 ({total_tokens} tokens)，触发压缩")
-            to_compress = chat_history
-            new_summary = await compress_conversation(
-                self.llm, conversation_summary, to_compress
-            )
-            conversation_summary = new_summary
-            save_conversation_summary(character, conversation_summary)
-            # 清空 chat_history，用摘要替代
+            logger.warning(f"上下文接近上限 ({total_tokens} tokens)，本轮裁掉最近对话以避免同步压缩")
             prompt = assemble_momo_prompt(
                 character, user_message,
                 chat_history="",

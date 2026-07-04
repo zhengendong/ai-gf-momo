@@ -53,13 +53,14 @@ class CharacterProfile(BaseModel):
 class AppSettings(BaseModel):
     """应用设置"""
     active_character: str = Field(default="momo")
-    context: dict = Field(default_factory=lambda: {"max_tokens": 8000, "compress_at": 0.9})
+    context: dict = Field(default_factory=lambda: {"max_tokens": 16000, "compress_at": 0.85})
     comfyui: dict = Field(default_factory=dict)
     heartbeat: dict = Field(default_factory=lambda: {"interval_minutes": 30, "quiet_start": "23:00", "quiet_end": "08:00"})
     memory: dict = Field(default_factory=lambda: {
         "condensation_days": 1,
         "retention_days": 30,
-        "turns_per_condense": 15,
+        "long_term_turns_per_condense": 15,
+        "soul_turns_per_condense": 15,
         "vector_recall_enabled": True,
         "vector_top_k": 5,
         "vector_max_distance": 0.55,

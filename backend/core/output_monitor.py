@@ -52,6 +52,94 @@ REPAIR_SYSTEM = """你是 AgentRuntime 的输出修复器。
 如果无法安全补齐状态，可以修改 reply，让它不再声称已经完成。
 只输出合法 JSON，不要输出 Markdown。"""
 
+OUTFIT_REQUEST_PATTERNS = (
+    "去换",
+    "换衣",
+    "换一套",
+    "换套",
+    "穿",
+    "脱",
+    "裙",
+    "袜",
+    "鞋",
+    "衣服",
+    "吊带",
+    "短裤",
+    "睡裙",
+)
+
+SCENE_REQUEST_PATTERNS = (
+    "去",
+    "到",
+    "回",
+    "房间",
+    "浴室",
+    "卧室",
+    "床上",
+    "沙发",
+    "坐",
+    "躺",
+    "站",
+)
+
+PENDING_REPLY_PATTERNS = (
+    "这就",
+    "马上",
+    "等我",
+    "等一下",
+    "稍等",
+    "一会",
+    "待会",
+    "去换",
+    "去拿",
+    "准备",
+    "我去",
+    "选一个",
+    "想看什么",
+)
+
+COMPLETED_REPLY_PATTERNS = (
+    "换好了",
+    "换好啦",
+    "换完了",
+    "换完啦",
+    "换回",
+    "穿好了",
+    "穿好啦",
+    "脱掉了",
+    "脱下",
+    "摘掉",
+    "戴上",
+    "穿上",
+    "穿回",
+    "穿着",
+    "又穿",
+    "现在穿",
+    "已经换",
+    "已经穿",
+    "已经脱",
+    "没戴",
+    "没有戴",
+    "光脚",
+    "赤脚",
+    "到了",
+    "坐在",
+    "躺在",
+    "站在",
+)
+
+CONFIRM_WORDS = (
+    "好",
+    "可以",
+    "行",
+    "嗯",
+    "就这个",
+    "就这",
+    "听你的",
+    "你选",
+    "随便",
+)
+
 
 async def check_output_consistency(
     llm,
@@ -63,28 +151,7 @@ async def check_output_consistency(
     local_issues = _local_consistency_issues(character, output)
     if local_issues:
         return MonitorResult(valid=False, issues=local_issues, needs_repair=True)
-
-    prompt = _build_monitor_prompt(character, user_message, output)
-    try:
-        raw = await llm.chat_prompt(
-            system=MONITOR_SYSTEM,
-            user=prompt,
-            temperature=0.1,
-            max_tokens=800,
-        )
-        data = _parse_json(raw)
-        valid = bool(data.get("valid", True))
-        issues = data.get("issues") or []
-        if not isinstance(issues, list):
-            issues = [str(issues)]
-        return MonitorResult(
-            valid=valid,
-            issues=[str(i) for i in issues if str(i).strip()],
-            needs_repair=bool(data.get("needs_repair", not valid)),
-        )
-    except Exception as e:
-        logger.warning("Output monitor failed, allowing original output: %s", e)
-        return MonitorResult(valid=True, issues=[], needs_repair=False)
+    return MonitorResult(valid=True, issues=[], needs_repair=False)
 
 
 async def repair_output_consistency(
@@ -180,6 +247,7 @@ def _local_consistency_issues(character: str, output: AgentOutput) -> list[str]:
     """Deterministic checks for tool/status divergence that must never pass."""
     issues: list[str] = []
     status_md = read_status(character)
+    plans_md = read_plans(character)
     current_outfit = normalize_outfit_tags(_status_section_tags(status_md, "穿着"))
     updates_outfit = _state_update_section(output.state_updates, "穿着")
     updated_outfit = normalize_outfit_tags(parse_outfit_tags(updates_outfit)) if updates_outfit else []
@@ -210,7 +278,63 @@ def _local_consistency_issues(character: str, output: AgentOutput) -> list[str]:
                 "ordinary clothes while accessories may remain."
             )
 
+    if _reply_commits_state_change(output.reply) and not _has_status_updates(output):
+        issues.append(
+            "reply says a real outfit/scene/body state change has already happened, but state_updates.status "
+            "is missing. Either add complete state_updates.status or rewrite reply so it does not claim the "
+            "state has changed."
+        )
+
+    if _reply_creates_pending_action(output.reply) and not _has_plan_updates(output):
+        issues.append(
+            "reply creates a pending action or waits for a user choice, but plan_updates is missing. Add or "
+            "update a short active plan so the next turn remembers what is being negotiated."
+        )
+
+    if _active_state_plan(plans_md) and _user_confirms_plan_context(output.reply) and not (
+        _has_status_updates(output) or _has_plan_updates(output)
+    ):
+        issues.append(
+            "there is an active state-related plan and the reply appears to continue/confirm it, but neither "
+            "state_updates nor plan_updates is present. Complete/update the status if the action happens, or "
+            "update the plan if it remains pending."
+        )
+
     return issues
+
+
+def infer_missing_plan_updates(
+    character: str,
+    user_message: str,
+    output: AgentOutput,
+) -> dict | None:
+    """Create a deterministic fallback plan for pending state work the model forgot."""
+    if _has_plan_updates(output) or _has_status_updates(output):
+        return None
+    if not (_mentions_outfit_or_scene(user_message) or _reply_creates_pending_action(output.reply)):
+        return None
+    if not _reply_creates_pending_action(output.reply):
+        return None
+
+    if _mentions_outfit(user_message) or _mentions_outfit(output.reply):
+        name = "处理服饰请求"
+        target = "确认并完成本轮服饰变化，完成时必须同步更新 status.md 的穿着"
+        complete_when = "服饰状态已经写入 status.md，或明确取消/拒绝该请求"
+    else:
+        name = "处理场景请求"
+        target = "确认并完成本轮场景/姿势相关变化，完成时必须同步更新 status.md 的场景细节"
+        complete_when = "场景状态已经写入 status.md，或明确取消/拒绝该请求"
+
+    return {
+        "add": [{
+            "name": name,
+            "type": "short",
+            "target": target,
+            "complete_when": complete_when,
+        }],
+        "update": [],
+        "close": [],
+    }
 
 
 def _status_section_tags(status_md: str, section: str) -> list[str]:
@@ -236,6 +360,61 @@ def _looks_like_partial_outfit_update(current_tags: list[str], updated_tags: lis
     if set(updated_tags) & explicit_nude:
         return False
     return len(current_tags) >= 4 and len(updated_tags) <= 2
+
+
+def _has_status_updates(output: AgentOutput) -> bool:
+    updates = output.state_updates
+    if not isinstance(updates, dict):
+        return False
+    status = updates.get("status")
+    return isinstance(status, dict) and any(str(v).strip() for v in status.values())
+
+
+def _has_plan_updates(output: AgentOutput) -> bool:
+    updates = output.plan_updates
+    if not isinstance(updates, dict):
+        return False
+    for key in ("add", "update", "close"):
+        value = updates.get(key)
+        if isinstance(value, list) and value:
+            return True
+    return False
+
+
+def _mentions_outfit(text: str) -> bool:
+    return any(word in (text or "") for word in OUTFIT_REQUEST_PATTERNS)
+
+
+def _mentions_scene(text: str) -> bool:
+    return any(word in (text or "") for word in SCENE_REQUEST_PATTERNS)
+
+
+def _mentions_outfit_or_scene(text: str) -> bool:
+    return _mentions_outfit(text) or _mentions_scene(text)
+
+
+def _reply_creates_pending_action(reply: str) -> bool:
+    text = reply or ""
+    if any(word in text for word in PENDING_REPLY_PATTERNS):
+        return _mentions_outfit_or_scene(text) or "选择" in text or "选" in text
+    return False
+
+
+def _reply_commits_state_change(reply: str) -> bool:
+    text = reply or ""
+    return any(word in text for word in COMPLETED_REPLY_PATTERNS) and _mentions_outfit_or_scene(text)
+
+
+def _active_state_plan(plans_md: str) -> bool:
+    text = plans_md or ""
+    if "status: active" not in text:
+        return False
+    return any(word in text for word in ("服饰", "穿着", "场景", "姿势", "状态"))
+
+
+def _user_confirms_plan_context(reply: str) -> bool:
+    text = reply or ""
+    return any(word in text for word in CONFIRM_WORDS + PENDING_REPLY_PATTERNS + COMPLETED_REPLY_PATTERNS)
 
 
 def _parse_json(raw: str) -> dict[str, Any]:

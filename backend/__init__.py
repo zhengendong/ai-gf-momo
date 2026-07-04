@@ -1,9 +1,12 @@
-"""
-AI_gf_momo - 智能女友小桃
-后端应用模块
-"""
+"""Backend package helpers."""
 
-from .main import app
 from .config import settings
 
 __all__ = ["app", "settings"]
+
+
+def __getattr__(name: str):
+    if name == "app":
+        from .main import app
+        return app
+    raise AttributeError(name)

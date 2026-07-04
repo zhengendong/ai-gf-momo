@@ -1,8 +1,8 @@
 {
-  "active_character": "momo",
+  "active_character": "sakura",
   "context": {
-    "max_tokens": 2000,
-    "compress_at": 0.9
+    "max_tokens": 16000,
+    "compress_at": 0.85
   },
   "comfyui": {
     "workflow": "waiNSFWIllustrious_v140.json",
@@ -22,7 +22,8 @@
   "memory": {
     "condensation_days": 1,
     "retention_days": 30,
-    "turns_per_condense": 15,
+    "long_term_turns_per_condense": 15,
+    "soul_turns_per_condense": 15,
     "vector_recall_enabled": true,
     "vector_top_k": 5,
     "vector_max_distance": 0.55

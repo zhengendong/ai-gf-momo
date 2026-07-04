@@ -99,7 +99,11 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                     or message_data.get("character")
                     or get_active()
                 )
-                await runtime.refresh_memory(session_id, character)
+                await runtime.refresh_memory(
+                    session_id,
+                    character,
+                    target=message_data.get("target", "all"),
+                )
 
             else:
                 logger.warning("Unknown websocket message type: %s", msg_type)

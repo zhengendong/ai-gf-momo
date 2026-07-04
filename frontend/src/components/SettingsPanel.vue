@@ -120,21 +120,39 @@
       </div>
 
       <div v-if="activeTab === '记忆'" class="tab-content">
-        <div class="form-field">
-          <label>每几轮沉淀</label>
-          <input v-model.number="settings.memory.turns_per_condense" type="number" min="0" />
-        </div>
-        <div class="form-row">
-          <div class="form-field"><label>沉淀天数</label><input v-model.number="settings.memory.condensation_days" type="number" /></div>
-          <div class="form-field"><label>保留天数</label><input v-model.number="settings.memory.retention_days" type="number" /></div>
-        </div>
-        <button @click="triggerCondense" class="save-btn">手动沉淀</button>
-        <div class="form-card">
-          <div class="form-field">
-            <label>长期记忆 (long_term.md)</label>
-            <textarea v-model="longTermContent" rows="12" style="font-family:monospace;font-size:13px;"></textarea>
+        <div class="memory-grid">
+          <div class="form-card memory-pane">
+            <div class="pane-head">
+              <div class="pane-title">长期记忆</div>
+              <button @click="triggerLongTermCondense" class="save-btn">刷新记忆</button>
+            </div>
+            <div class="form-field">
+              <label>每几轮沉淀</label>
+              <input v-model.number="settings.memory.long_term_turns_per_condense" type="number" min="0" />
+            </div>
+            <button @click="saveMemorySettings" class="cancel-btn">保存设置</button>
+            <div class="form-field">
+              <label>long_term.md</label>
+              <textarea v-model="longTermContent" rows="14" style="font-family:monospace;font-size:13px;"></textarea>
+            </div>
+            <button @click="saveLongTerm" class="save-btn">保存长期记忆</button>
           </div>
-          <button @click="saveLongTerm" class="save-btn">保存长期记忆</button>
+          <div class="form-card memory-pane">
+            <div class="pane-head">
+              <div class="pane-title">灵魂</div>
+              <button @click="triggerSoulCondense" class="save-btn">刷新灵魂</button>
+            </div>
+            <div class="form-field">
+              <label>每几轮沉淀</label>
+              <input v-model.number="settings.memory.soul_turns_per_condense" type="number" min="0" />
+            </div>
+            <button @click="saveMemorySettings" class="cancel-btn">保存设置</button>
+            <div class="form-field">
+              <label>soul.md</label>
+              <textarea v-model="soulContent" rows="14" style="font-family:monospace;font-size:13px;"></textarea>
+            </div>
+            <button @click="saveSoul" class="save-btn">保存灵魂</button>
+          </div>
         </div>
       </div>
 
@@ -207,7 +225,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted, watch } from 'vue'
+import { ref, reactive, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useCharacter } from '../composables/useCharacter.js'
 
 const { profile, activeCharId, saveProfile } = useCharacter()
@@ -219,6 +237,7 @@ const tabs = ['通用', '角色', '用户', '皮肤', '生图', '记忆', 'Heart
 const saved = ref(false)
 const identityContent = ref('')
 const longTermContent = ref('')
+const soulContent = ref('')
 const userProfile = reactive({ user_pet_name: '', identity: '', communication_style: '', notes: '' })
 
 const llmProfiles = ref([])
@@ -230,7 +249,7 @@ const editingProviderKey = ref(null)
 const newProviderKey = ref('')
 
 const settings = reactive({
-  context: { max_tokens: 8000, compress_at: 0.7 },
+  context: { max_tokens: 16000, compress_at: 0.85 },
   comfyui: {
     workflow: 'waiNSFWIllustrious_v140.json',
     negative_prompt: 'bad quality,worst quality,worst detail,sketch,censor',
@@ -244,7 +263,8 @@ const settings = reactive({
   memory: {
     condensation_days: 1,
     retention_days: 30,
-    turns_per_condense: 15,
+    long_term_turns_per_condense: 15,
+    soul_turns_per_condense: 15,
     vector_recall_enabled: true,
     vector_top_k: 5,
     vector_max_distance: 0.55
@@ -364,19 +384,48 @@ const loadCharacterDocs = async () => {
     const r = await fetch(`${API}/characters/${char}/long-term`)
     if (r.ok) longTermContent.value = (await r.json()).content
   } catch (e) { /* ignore */ }
+  try {
+    const r = await fetch(`${API}/characters/${char}/soul`)
+    if (r.ok) soulContent.value = (await r.json()).content
+  } catch (e) { /* ignore */ }
 }
 
 onMounted(async () => {
   try {
     const s = await fetch(`${API}/settings`).then(r => r.json())
     Object.assign(settings, s)
+    normalizeMemorySettings()
   } catch (e) { console.error('加载设置失败:', e) }
   await loadCharacterDocs()
   await loadProfiles()
   await loadProviders()
+  window.addEventListener('memory-status-update', onMemoryStatusUpdate)
+})
+
+onUnmounted(() => {
+  window.removeEventListener('memory-status-update', onMemoryStatusUpdate)
 })
 
 watch(activeCharId, loadCharacterDocs)
+watch(activeTab, (tab) => {
+  if (tab === '记忆') loadCharacterDocs()
+})
+
+const onMemoryStatusUpdate = () => {
+  if (activeTab.value === '记忆') loadCharacterDocs()
+}
+
+const normalizeMemorySettings = () => {
+  const legacy = Number(settings.memory.turns_per_condense || 0)
+  if (!settings.memory.long_term_turns_per_condense) {
+    settings.memory.long_term_turns_per_condense = legacy || 15
+  }
+  if (!settings.memory.soul_turns_per_condense) {
+    settings.memory.soul_turns_per_condense = legacy || 15
+  }
+  if (!settings.memory.condensation_days) settings.memory.condensation_days = 1
+  if (!settings.memory.retention_days) settings.memory.retention_days = 30
+}
 
 const onSaveProfile = async () => {
   await saveProfile()
@@ -417,6 +466,15 @@ const saveLongTerm = async () => {
   showSaved()
 }
 
+const saveSoul = async () => {
+  await fetch(`${API}/characters/${activeCharId.value}/soul`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ content: soulContent.value })
+  })
+  showSaved()
+}
+
 const saveGeneral = async () => {
   await fetch(`${API}/settings`, {
     method: 'PUT',
@@ -435,10 +493,50 @@ const saveComfyui = async () => {
   showSaved()
 }
 
-const triggerCondense = () => {
-  fetch(`${API}/memory/condense?character=${activeCharId.value}&days=${settings.memory.condensation_days}`, { method: 'POST' })
-    .then(() => alert('沉淀完成'))
+const saveMemorySettings = async () => {
+  const memory = {
+    ...settings.memory,
+    long_term_turns_per_condense: Number(settings.memory.long_term_turns_per_condense || 0),
+    soul_turns_per_condense: Number(settings.memory.soul_turns_per_condense || 0)
+  }
+  delete memory.turns_per_condense
+  await fetch(`${API}/settings`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ memory })
+  })
+  settings.memory = memory
+  showSaved()
 }
+
+const triggerCondenseTarget = async (target) => {
+  const char = activeCharId.value
+  if (!char) {
+    alert('当前角色还没加载完成')
+    return
+  }
+  const days = settings.memory.condensation_days || 1
+  const r = await fetch(`${API}/memory/condense?character=${activeCharId.value}&days=${days}&target=${target}`, { method: 'POST' })
+  const data = await r.json().catch(() => ({}))
+  await loadCharacterDocs()
+  if (!r.ok) {
+    alert('沉淀失败')
+    return
+  }
+  const result = data.result || {}
+  if (result.soul || result.long_term) {
+    const changed = [
+      result.long_term ? '长期记忆' : '',
+      result.soul ? '灵魂记忆' : ''
+    ].filter(Boolean).join('、')
+    alert(`沉淀完成，已刷新：${changed}`)
+  } else {
+    alert('没有可沉淀的新内容，或模型没有返回有效记忆')
+  }
+}
+
+const triggerLongTermCondense = () => triggerCondenseTarget('long_term')
+const triggerSoulCondense = () => triggerCondenseTarget('soul')
 </script>
 
 <style scoped>
@@ -505,6 +603,10 @@ const triggerCondense = () => {
 .form-field textarea { resize: vertical; min-height: 38px; }
 .form-card { background: var(--bg-lighter); border-radius: var(--radius-sm); padding: 12px; }
 .form-row { display: flex; gap: 12px; }
+.memory-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.memory-pane { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.pane-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.pane-title { font-size: 13px; font-weight: 700; color: var(--text-dark); }
 .save-btn {
   background: linear-gradient(135deg, var(--gradient-start), var(--gradient-end));
   color: #fff;
@@ -530,5 +632,8 @@ const triggerCondense = () => {
   cursor: pointer;
   font-size: 13px;
   color: var(--text-light);
+}
+@media (max-width: 860px) {
+  .memory-grid { grid-template-columns: 1fr; }
 }
 </style>

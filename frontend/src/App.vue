@@ -3,6 +3,7 @@
     <StatusBar
       :is-connected="isConnected"
       :image-status="imageStatus"
+      :status-update="statusUpdate"
       :character-name="profile.name"
       :character-avatar="profile.avatar"
       :characters="characters"
@@ -46,7 +47,7 @@ import StatePanel from './components/StatePanel.vue'
 
 const {
   isConnected, messages, lastMessage,
-  imageStatus, characterState,
+  imageStatus, statusUpdate, characterState,
   sendMessage, refreshMemory, syncCharacter, loadHistory,
 } = useWebSocket()
 

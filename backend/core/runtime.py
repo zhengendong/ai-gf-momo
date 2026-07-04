@@ -2,6 +2,7 @@
 
 import json
 import logging
+import time
 from datetime import datetime
 from typing import Protocol
 
@@ -20,8 +21,9 @@ from ..core.context import (
 )
 from ..core.memory_policy import (
     build_context_window,
-    bump_turn_and_should_condense,
+    bump_turn_and_due_targets,
     index_chat_pair,
+    mark_condense_failed,
     memory_settings,
     recall_vector_context,
     reset_condense_counter,
@@ -29,6 +31,7 @@ from ..core.memory_policy import (
 from ..core.orchestrator import bg_tasks
 from ..core.output_monitor import (
     check_output_consistency,
+    infer_missing_plan_updates,
     repair_output_consistency,
 )
 from ..core.plan_manager import (
@@ -40,6 +43,7 @@ from ..core.plan_manager import (
 from ..core.state import apply_state_updates
 from ..core.time_system import write_last_chat
 from ..models.schemas import StreamChunk
+from ..services.prompt_builder import sanitize_dynamic_photo_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +81,7 @@ class AgentRuntime:
                 self.chat_history_buffer.pop(key, None)
 
     async def handle_message(self, session_id: str, character: str, content: str):
+        started_at = time.perf_counter()
         char = character
         char_name = get_character_name(char)
         user_label = get_user_pet_name(char) or "用户"
@@ -85,6 +90,7 @@ class AgentRuntime:
         try:
             history = self.chat_history_buffer.get(buffer_key, [])
             base_prompt = assemble_momo_prompt(char, content)
+            context_started = time.perf_counter()
             summary, chat_history = await build_context_window(
                 self.momo_agent.llm,
                 char,
@@ -96,7 +102,14 @@ class AgentRuntime:
             if not chat_history and history:
                 chat_history = "\n".join(history[-MAX_HISTORY_TURNS:])
             recalled_memories = recall_vector_context(char, content)
+            logger.info(
+                "Runtime context ready: character=%s elapsed=%.3fs history_chars=%s",
+                char,
+                time.perf_counter() - context_started,
+                len(chat_history or ""),
+            )
 
+            llm_started = time.perf_counter()
             output = await self.momo_agent.process(
                 character=char,
                 user_message=content,
@@ -104,16 +117,29 @@ class AgentRuntime:
                 conversation_summary=summary,
                 recalled_memories=recalled_memories,
             )
+            logger.info(
+                "Runtime main LLM done: character=%s elapsed=%.3fs",
+                char,
+                time.perf_counter() - llm_started,
+            )
+            if output.photo_prompt:
+                output.photo_prompt = sanitize_dynamic_photo_prompt(output.photo_prompt)
+            self._apply_fallback_plan_if_needed(char, content, output)
 
+            consistency_started = time.perf_counter()
             output = await self._ensure_consistent_output(char, content, output)
-
-            await self.sender.send_chunk(
-                session_id,
-                StreamChunk(type="text", content=output.reply),
-                character=char,
+            logger.info(
+                "Runtime consistency done: character=%s elapsed=%.3fs",
+                char,
+                time.perf_counter() - consistency_started,
             )
 
             if not output.persist_context:
+                await self.sender.send_chunk(
+                    session_id,
+                    StreamChunk(type="text", content=output.reply),
+                    character=char,
+                )
                 await self.sender.send_chunk(
                     session_id,
                     StreamChunk(type="image_status", content="done"),
@@ -138,16 +164,11 @@ class AgentRuntime:
             if wrote_runtime_state:
                 await self.push_current_state(session_id, char)
 
-            if output.photo_prompt:
-                bg_tasks.schedule(
-                    self.image_pipeline.generate(session_id, output.photo_prompt, char)
-                )
-            else:
-                await self.sender.send_chunk(
-                    session_id,
-                    StreamChunk(type="image_status", content="done"),
-                    character=char,
-                )
+            await self.sender.send_chunk(
+                session_id,
+                StreamChunk(type="text", content=output.reply),
+                character=char,
+            )
 
             if output.immediate_memory:
                 bg_tasks.schedule(
@@ -160,12 +181,26 @@ class AgentRuntime:
             bg_tasks.schedule(
                 self._async_append_chat_history(char, content, output.reply)
             )
-            bg_tasks.schedule(
-                self._async_index_vector_memory(char, content, output.reply)
-            )
-            if bump_turn_and_should_condense(char):
+            if memory_settings().get("vector_recall_enabled", True):
                 bg_tasks.schedule(
-                    self._async_condense_memory(char, trigger="turn_interval")
+                    self._async_index_vector_memory(char, content, output.reply)
+                )
+            due_condense_targets = bump_turn_and_due_targets(char)
+            if due_condense_targets:
+                target = "all" if len(due_condense_targets) > 1 else due_condense_targets[0]
+                bg_tasks.schedule(
+                    self._async_condense_memory(char, trigger="turn_interval", target=target)
+                )
+
+            if output.photo_prompt:
+                bg_tasks.schedule(
+                    self.image_pipeline.generate(session_id, output.photo_prompt, char, reply=output.reply)
+                )
+            else:
+                await self.sender.send_chunk(
+                    session_id,
+                    StreamChunk(type="image_status", content="done"),
+                    character=char,
                 )
 
             try:
@@ -182,6 +217,11 @@ class AgentRuntime:
                 StreamChunk(type="done", done=True),
                 character=char,
             )
+            logger.info(
+                "Runtime turn done: character=%s total=%.3fs",
+                char,
+                time.perf_counter() - started_at,
+            )
 
         except Exception as e:
             content = self._format_user_facing_error(char_name, e)
@@ -192,11 +232,32 @@ class AgentRuntime:
                 character=char,
             )
 
-    async def refresh_memory(self, session_id: str, character: str):
-        bg_tasks.schedule(self._async_condense_memory(character, trigger="manual"))
+    async def refresh_memory(self, session_id: str, character: str, target: str = "all"):
+        label = self._condense_target_label(target)
         await self.sender.send_chunk(
             session_id,
-            StreamChunk(type="text", content="记忆刷新已触发～"),
+            StreamChunk(type="status_update", content=f"正在沉淀{label}..."),
+            character=character,
+        )
+        result = await self._condense_memory(character, trigger="manual", target=target)
+        if result:
+            changed = []
+            if result.get("soul"):
+                changed.append("soul")
+            if result.get("long_term"):
+                changed.append("long_term")
+            changed_label = "、".join(changed) if changed else label
+            content = f"{label}沉淀完成：已更新 {changed_label}。"
+        else:
+            content = f"没有可沉淀的新{label}，或沉淀失败。"
+        await self.sender.send_chunk(
+            session_id,
+            StreamChunk(type="status_update", content=content),
+            character=character,
+        )
+        await self.sender.send_chunk(
+            session_id,
+            StreamChunk(type="text", content=content),
             character=character,
         )
 
@@ -239,30 +300,66 @@ class AgentRuntime:
         if result.valid or not result.needs_repair:
             return output
 
-        logger.info("Output monitor requested repair for %s: %s", character, result.issues)
-        repaired = await repair_output_consistency(
-            self.momo_agent.llm,
-            character,
-            user_message,
-            output,
-            result,
-        )
-        second = await check_output_consistency(
-            self.momo_agent.llm,
-            character,
-            user_message,
-            repaired,
-        )
-        if second.valid:
-            return repaired
+        logger.warning("Output consistency issue for %s: %s", character, result.issues)
+        try:
+            repaired = await repair_output_consistency(
+                self.momo_agent.llm,
+                character,
+                user_message,
+                output,
+                result,
+            )
+            if repaired.photo_prompt:
+                repaired.photo_prompt = sanitize_dynamic_photo_prompt(repaired.photo_prompt)
+            self._apply_fallback_plan_if_needed(character, user_message, repaired)
+            second = await check_output_consistency(
+                self.momo_agent.llm,
+                character,
+                user_message,
+                repaired,
+            )
+            if second.valid:
+                return repaired
+            logger.warning(
+                "Output still inconsistent after repair for %s: %s",
+                character,
+                second.issues,
+            )
+        except Exception as e:
+            logger.warning("Output repair failed for %s: %s", character, e)
 
-        logger.warning(
-            "Output still inconsistent after repair for %s: %s",
-            character,
-            second.issues,
-        )
-        repaired.photo_prompt = None
-        return repaired
+        self._drop_unsafe_outfit_update(output)
+        output.photo_prompt = None
+        return output
+
+    def _apply_fallback_plan_if_needed(self, character: str, user_message: str, output):
+        fallback = infer_missing_plan_updates(character, user_message, output)
+        if not fallback:
+            return
+        if isinstance(output.plan_updates, dict):
+            merged = {
+                "add": list(output.plan_updates.get("add") or []),
+                "update": list(output.plan_updates.get("update") or []),
+                "close": list(output.plan_updates.get("close") or []),
+            }
+            for key in ("add", "update", "close"):
+                merged[key].extend(fallback.get(key) or [])
+            output.plan_updates = merged
+        else:
+            output.plan_updates = fallback
+
+    def _drop_unsafe_outfit_update(self, output):
+        updates = output.state_updates
+        if not isinstance(updates, dict):
+            return
+        status = updates.get("status")
+        if not isinstance(status, dict):
+            return
+        status.pop("穿着", None)
+        if not status:
+            updates.pop("status", None)
+        if not updates:
+            output.state_updates = None
 
     def _format_user_facing_error(self, char_name: str, error: Exception) -> str:
         if isinstance(error, httpx.HTTPStatusError):
@@ -361,13 +458,40 @@ class AgentRuntime:
         except Exception as e:
             logger.error("Index vector memory failed for %s: %s", character, e)
 
-    async def _async_condense_memory(self, character: str, trigger: str = "manual"):
+    async def _async_condense_memory(self, character: str, trigger: str = "manual", target: str = "all"):
+        await self._condense_memory(character, trigger=trigger, target=target)
+
+    async def _condense_memory(self, character: str, trigger: str = "manual", target: str = "all"):
         try:
             days = int(memory_settings().get("condensation_days") or 1)
-            await self.memory_agent.condense(character, days=days)
-            reset_condense_counter(character, trigger=trigger)
+            result = await self.memory_agent.condense(character, days=days, target=target)
+            if self._condense_result_has_update(result, target=target):
+                reset_condense_counter(character, trigger=trigger, target=target)
+            else:
+                mark_condense_failed(character, trigger=trigger, error="empty_result", target=target)
+            return result
         except Exception as e:
+            mark_condense_failed(character, trigger=trigger, error=str(e), target=target)
             logger.error("Memory condensation failed for %s: %s", character, e)
+            return {}
+
+    def _condense_result_has_update(self, result: dict | None, target: str = "all") -> bool:
+        if not isinstance(result, dict):
+            return False
+        if target in ("memory", "long-term", "longterm"):
+            target = "long_term"
+        if target == "long_term":
+            return bool((result.get("long_term") or "").strip())
+        if target == "soul":
+            return bool((result.get("soul") or "").strip())
+        return bool((result.get("soul") or "").strip() or (result.get("long_term") or "").strip())
+
+    def _condense_target_label(self, target: str = "all") -> str:
+        if target in ("long_term", "memory", "long-term", "longterm"):
+            return "长期记忆"
+        if target == "soul":
+            return "灵魂"
+        return "记忆"
 
     def _parse_status_sections(self, content: str, character: str | None = None) -> dict:
         sections = self._parse_markdown_sections(content)
@@ -381,7 +505,7 @@ class AgentRuntime:
 
     def _parse_plan_sections(self, content: str) -> dict:
         sections = self._parse_markdown_sections(content)
-        allowed = {"当前目标", "想做的事"}
+        allowed = {"当前目标", "想做的事", "长期计划", "短期计划", "其他"}
         return {k: v for k, v in sections.items() if k in allowed}
 
     def _parse_markdown_sections(self, content: str) -> dict:
