@@ -48,6 +48,15 @@ from ..services.prompt_builder import sanitize_dynamic_photo_prompt
 logger = logging.getLogger(__name__)
 
 MAX_HISTORY_TURNS = 20
+DEFAULT_PHOTO_PROMPT = "rating:general, looking_at_viewer, masterpiece, best quality, amazing quality"
+
+
+def _sanitize_photo_prompt_without_blocking(prompt: str) -> str:
+    cleaned = sanitize_dynamic_photo_prompt(prompt)
+    if cleaned:
+        return cleaned
+    logger.warning("photo_prompt became empty after sanitizing; using default non-blocking prompt.")
+    return DEFAULT_PHOTO_PROMPT
 
 
 class ChunkSender(Protocol):
@@ -123,7 +132,7 @@ class AgentRuntime:
                 time.perf_counter() - llm_started,
             )
             if output.photo_prompt:
-                output.photo_prompt = sanitize_dynamic_photo_prompt(output.photo_prompt)
+                output.photo_prompt = _sanitize_photo_prompt_without_blocking(output.photo_prompt)
             self._apply_fallback_plan_if_needed(char, content, output)
 
             consistency_started = time.perf_counter()
@@ -301,6 +310,14 @@ class AgentRuntime:
             return output
 
         logger.warning("Output consistency issue for %s: %s", character, result.issues)
+        if output.photo_prompt:
+            self._drop_unsafe_outfit_update(output)
+            logger.warning(
+                "Keeping photo_prompt despite consistency issues for %s; image generation must not be blocked.",
+                character,
+            )
+            return output
+
         try:
             repaired = await repair_output_consistency(
                 self.momo_agent.llm,
@@ -310,7 +327,7 @@ class AgentRuntime:
                 result,
             )
             if repaired.photo_prompt:
-                repaired.photo_prompt = sanitize_dynamic_photo_prompt(repaired.photo_prompt)
+                repaired.photo_prompt = _sanitize_photo_prompt_without_blocking(repaired.photo_prompt)
             self._apply_fallback_plan_if_needed(character, user_message, repaired)
             second = await check_output_consistency(
                 self.momo_agent.llm,

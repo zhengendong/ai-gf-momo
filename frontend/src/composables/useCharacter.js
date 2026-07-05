@@ -9,6 +9,7 @@ const profile = reactive({
   name: '',
   gender: 'female',
   avatar: '',
+  initial_outfit_tags: '',
   visual_anchor: {
     role_tags: '',
     body_tags: '',
@@ -21,6 +22,7 @@ const emptyProfile = () => ({
   name: '',
   gender: 'female',
   avatar: '',
+  initial_outfit_tags: '',
   visual_anchor: {
     role_tags: '',
     body_tags: '',
@@ -87,6 +89,7 @@ export function useCharacter() {
       name: profile.name,
       gender: profile.gender,
       avatar: profile.avatar,
+      initial_outfit_tags: profile.initial_outfit_tags || '',
       visual_anchor: {
         role_tags: profile.visual_anchor?.role_tags || '',
         body_tags: profile.visual_anchor?.body_tags || '',
@@ -120,7 +123,8 @@ export function useCharacter() {
       characters.value = characters.value.filter(c => c !== name)
       if (activeCharId.value === name) await loadAll()
     }
-    return res.ok
+    const err = res.ok ? {} : await res.json().catch(() => ({}))
+    return { ok: res.ok, error: err.detail || res.statusText || '删除失败' }
   }
 
   const clearCharacterRecords = async (name) => {

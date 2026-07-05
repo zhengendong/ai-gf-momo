@@ -66,6 +66,7 @@ class ProfileUpdate(BaseModel):
     body_type: str = None
     appearance: str = None
     visual_anchor: dict = None
+    initial_outfit_tags: list[str] | str | None = None
 
 
 class CreateCharacterRequest(BaseModel):
@@ -88,6 +89,7 @@ class OutfitGenerateRequest(BaseModel):
     identity: str = ""
     visual_anchor: dict = None
     skin_match: dict = None
+    outfit_request: str = ""
 
 
 @router.get("/skin-mapping/search")
@@ -102,6 +104,7 @@ async def generate_skin_outfit(request: OutfitGenerateRequest):
         request.visual_anchor or {},
         request.identity or "",
         request.skin_match or {},
+        request.outfit_request or "",
     )
 
 
@@ -127,7 +130,20 @@ async def create_char(request: CreateCharacterRequest):
             "body_tags": request.body_type,
             "appearance_tags": request.appearance,
         }
-        initial_outfit_tags = _clean_outfit_tags(request.initial_outfit_tags)
+        initial_outfit_tags = []
+        outfit_request = _outfit_request_text(request.initial_outfit_tags)
+        if outfit_request and _should_generate_outfit_from_request(outfit_request):
+            generated = await _generate_initial_outfit(
+                request.display_name or request.name,
+                visual_anchor,
+                request.identity,
+                {},
+                outfit_request,
+            )
+            initial_outfit_tags = generated["outfit_tags"]
+        elif outfit_request:
+            initial_outfit_tags = _clean_outfit_tags(outfit_request)
+
         if not initial_outfit_tags and request.auto_generate_initial_outfit:
             generated = await _generate_initial_outfit(
                 request.display_name or request.name,
@@ -157,6 +173,7 @@ async def _generate_initial_outfit(
     visual_anchor: dict,
     identity: str = "",
     skin_match: dict | None = None,
+    outfit_request: str = "",
 ) -> dict:
     skin_match = skin_match or {}
     fallback = _fallback_outfit(display_name, visual_anchor, identity, skin_match)
@@ -168,6 +185,7 @@ Use English lowercase tags with underscores. Do not include body, hair, eye, pos
         "identity": identity,
         "visual_anchor": visual_anchor,
         "matched_skin": skin_match,
+        "user_outfit_request": outfit_request,
         "output_schema": {
             "outfit_tags": ["tag1", "tag2", "tag3"],
             "reason": "short Chinese reason",
@@ -176,7 +194,8 @@ Use English lowercase tags with underscores. Do not include body, hair, eye, pos
             "Return 4 to 8 outfit/accessory tags.",
             "Tags should work as comma-separated Danbooru tags.",
             "Avoid explicit nudity and underwear-only outfits.",
-            "Prefer a signature outfit that fits the character identity and visual style.",
+            "If user_outfit_request is present, satisfy it while keeping tags coherent with the character.",
+            "If user_outfit_request is empty, prefer a signature outfit that fits the character identity and visual style.",
         ],
     }
     try:
@@ -252,6 +271,31 @@ def _clean_outfit_tags(value) -> list[str]:
     return normalize_outfit_tags(tags)[:10]
 
 
+def _outfit_request_text(value) -> str:
+    if not value:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, list):
+        return "\n".join(str(item).strip() for item in value if str(item).strip())
+    return str(value).strip()
+
+
+def _should_generate_outfit_from_request(text: str) -> bool:
+    if any("\u4e00" <= ch <= "\u9fff" for ch in text):
+        return True
+    raw_items = [item.strip() for item in re.split(r"[,\n]", text) if item.strip()]
+    if not raw_items:
+        return False
+    prose_words = {"a", "an", "the", "with", "and", "or", "in", "on", "for", "style", "wearing"}
+    for item in raw_items:
+        words = [word for word in item.lower().replace("_", " ").split() if word]
+        if len(words) > 3 or any(word in prose_words for word in words):
+            return True
+    valid_tags = _clean_outfit_tags(text)
+    return len(valid_tags) != len(raw_items)
+
+
 def _fallback_outfit(display_name: str, visual_anchor: dict, identity: str, skin_match: dict) -> list[str]:
     presets = [
         ["casual_dress", "cardigan", "ankle_boots", "hair_ribbon"],
@@ -278,6 +322,9 @@ async def delete_char(name: str):
         return {"status": "ok"}
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.error("删除角色失败: %s: %s", name, e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"删除角色失败: {e}")
 
 
 @router.delete("/characters/{name}/records")

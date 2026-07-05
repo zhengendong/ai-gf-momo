@@ -33,7 +33,7 @@
     </div>
   </aside>
 
-  <div v-if="creating" class="modal-mask" @click.self="closeModal">
+  <div v-if="creating" class="modal-mask">
     <div class="modal-card">
       <h3>新建角色</h3>
       <div class="form-row">
@@ -87,7 +87,7 @@
       </div>
       <div class="form-field">
         <label>初始化服饰</label>
-        <textarea v-model="form.initial_outfit_tags" rows="3" placeholder="留空时创建角色会自动生成"></textarea>
+        <textarea v-model="form.initial_outfit_tags" rows="3" placeholder="可填中文要求，如“清凉的夏日连衣裙”；也可填英文标签。留空时按角色自动生成"></textarea>
       </div>
       <button class="secondary-action" @click="generateInitialOutfit" :disabled="outfitGenerating">
         {{ outfitGenerating ? '生成中...' : 'AI 生成初始化服饰' }}
@@ -95,6 +95,20 @@
       <div class="modal-actions">
         <button class="primary" @click="saveModal" :disabled="!form.id">创建</button>
         <button @click="closeModal">取消</button>
+      </div>
+    </div>
+  </div>
+
+  <div v-if="deleteTarget" class="modal-mask">
+    <div class="confirm-card">
+      <h3>删除角色</h3>
+      <p>确认删除「{{ deleteDisplayName }}」？这会删除该角色的设定、记忆、聊天记录和图片数据。</p>
+      <div v-if="deleteError" class="error-text">{{ deleteError }}</div>
+      <div class="modal-actions">
+        <button class="danger-btn" @click="confirmDelete" :disabled="deleting">
+          {{ deleting ? '删除中...' : '删除角色' }}
+        </button>
+        <button @click="cancelDelete" :disabled="deleting">取消</button>
       </div>
     </div>
   </div>
@@ -118,6 +132,10 @@ const profileCache = reactive({})
 const creating = ref(false)
 const openMenuFor = ref('')
 const outfitGenerating = ref(false)
+const deleteTarget = ref('')
+const deleteDisplayName = ref('')
+const deleteError = ref('')
+const deleting = ref(false)
 const form = reactive(defaultForm())
 
 watch(characters, refreshProfiles, { immediate: true, deep: true })
@@ -185,6 +203,7 @@ async function generateInitialOutfit() {
           body_tags: form.body_tags,
           appearance_tags: form.appearance_tags,
         },
+        outfit_request: form.initial_outfit_tags,
       })
     })
     const data = await r.json()
@@ -228,10 +247,35 @@ async function clearRecords(id) {
 
 async function deleteOne(id) {
   openMenuFor.value = ''
-  const displayName = profileCache[id]?.name || id
-  if (!confirm(`确认删除角色「${displayName}」？这会删除该角色的设定、记忆、聊天记录和图片数据。`)) return
-  await deleteCharacter(id)
-  delete profileCache[id]
+  deleteTarget.value = id
+  deleteDisplayName.value = profileCache[id]?.name || id
+  deleteError.value = ''
+}
+
+function cancelDelete() {
+  if (deleting.value) return
+  deleteTarget.value = ''
+  deleteDisplayName.value = ''
+  deleteError.value = ''
+}
+
+async function confirmDelete() {
+  if (!deleteTarget.value) return
+  deleting.value = true
+  deleteError.value = ''
+  const id = deleteTarget.value
+  try {
+    const result = await deleteCharacter(id)
+    if (!result.ok) {
+      deleteError.value = result.error || '删除失败，请稍后重试。'
+      return
+    }
+    delete profileCache[id]
+    deleteTarget.value = ''
+    deleteDisplayName.value = ''
+  } finally {
+    deleting.value = false
+  }
 }
 </script>
 
@@ -372,7 +416,17 @@ async function deleteOne(id) {
   padding: 20px;
   box-shadow: 0 12px 36px rgba(0,0,0,0.16);
 }
+.confirm-card {
+  width: 360px;
+  background: #fff;
+  border-radius: 10px;
+  padding: 20px;
+  box-shadow: 0 12px 36px rgba(0,0,0,0.16);
+}
 .modal-card h3 { margin: 0 0 14px; font-size: 17px; }
+.confirm-card h3 { margin: 0 0 10px; font-size: 17px; color: #991b1b; }
+.confirm-card p { margin: 0 0 14px; font-size: 13px; line-height: 1.6; color: var(--text-dark); }
+.error-text { margin-bottom: 10px; font-size: 12px; color: #b91c1c; }
 .form-row { display: flex; gap: 12px; }
 .form-field { display: flex; flex-direction: column; gap: 4px; flex: 1; margin-bottom: 10px; }
 .form-field label { font-size: 12px; color: var(--text-light); }
@@ -398,6 +452,11 @@ async function deleteOne(id) {
   color: #fff;
   border: none;
   background: linear-gradient(135deg, var(--gradient-start), var(--gradient-end));
+}
+.modal-actions .danger-btn {
+  color: #fff;
+  border: none;
+  background: #dc2626;
 }
 .secondary-action {
   border: 1px solid var(--border-light);

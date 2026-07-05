@@ -6,6 +6,8 @@
 import json
 import logging
 import shutil
+import gc
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -53,7 +55,7 @@ def create_character(name: str, profile: dict):
     char_dir.mkdir(parents=True, exist_ok=True)
 
     # profile.json 是“皮肤”文件，皮肤信息只落进 visual_anchor（不重复存平铺字段）。
-    skin_keys = {"name", "avatar", "gender", "visual_anchor"}
+    skin_keys = {"name", "avatar", "gender", "visual_anchor", "initial_outfit_tags"}
     default_profile = {"name": name, "avatar": "💕"}
     for k, v in profile.items():
         if k in skin_keys:
@@ -123,15 +125,16 @@ def delete_character(name: str):
         if remaining:
             switch_character(remaining[0])
 
+    _release_vector_locks()
     if char_dir.exists():
-        shutil.rmtree(char_dir)
+        _remove_tree(char_dir)
     for path in [
         settings.legacy_characters_dir / name,
         settings.legacy_memory_dir / name,
         settings.legacy_data_dir / name,
     ]:
         if path.exists():
-            shutil.rmtree(path)
+            _remove_tree(path)
     logger.info("角色 '%s' 已删除", name)
 
 
@@ -158,14 +161,16 @@ def reset_character_memory(name: str):
     memory_dir = settings.get_memory_dir(name)
     images_dir = settings.get_images_dir(name)
     vector_dir = settings.get_vector_dir(name)
+    reset_outfit_tags = _reset_outfit_tags(name)
 
+    _release_vector_locks()
     if memory_dir.exists():
-        shutil.rmtree(memory_dir)
+        _remove_tree(memory_dir)
     if images_dir.exists():
-        shutil.rmtree(images_dir)
+        _remove_tree(images_dir)
     vector_root = vector_dir.parent
     if vector_root.exists():
-        shutil.rmtree(vector_root)
+        _remove_tree(vector_root)
 
     memory_dir.mkdir(parents=True, exist_ok=True)
     images_dir.mkdir(parents=True, exist_ok=True)
@@ -179,8 +184,29 @@ def reset_character_memory(name: str):
         f"# {display_name}的长期记忆\n\n（随对话自然生长）\n",
         encoding="utf-8",
     )
-    (memory_dir / "status.md").write_text(_default_status(name), encoding="utf-8")
+    (memory_dir / "status.md").write_text(_default_status(name, reset_outfit_tags), encoding="utf-8")
     (memory_dir / "plans.md").write_text(_default_plans(name), encoding="utf-8")
+
+
+def _reset_outfit_tags(name: str):
+    profile = get_profile(name)
+    initial = profile.get("initial_outfit_tags")
+    if initial:
+        return initial
+    return _current_status_outfit_tags(name)
+
+
+def _current_status_outfit_tags(name: str) -> list[str]:
+    path = settings.get_memory_dir(name) / "status.md"
+    if not path.exists():
+        return []
+    text = path.read_text(encoding="utf-8")
+    marker = "## 穿着"
+    if marker not in text:
+        return []
+    section = text.split(marker, 1)[1].split("\n## ", 1)[0]
+    from .outfit_state import parse_outfit_tags
+    return parse_outfit_tags(section)
 
 
 def get_profile(name: str) -> dict:
@@ -296,6 +322,26 @@ def _remove_empty_dir(path: Path):
             path.rmdir()
     except Exception:
         pass
+
+
+def _release_vector_locks():
+    try:
+        from chromadb.api.client import SharedSystemClient
+        SharedSystemClient.clear_system_cache()
+    except Exception:
+        pass
+    gc.collect()
+
+
+def _remove_tree(path: Path):
+    def _onerror(func, failed_path, exc_info):
+        try:
+            os.chmod(failed_path, 0o700)
+            func(failed_path)
+        except Exception:
+            raise
+
+    shutil.rmtree(path, onerror=_onerror)
 
 
 def _load_settings() -> dict:
