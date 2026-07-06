@@ -76,7 +76,7 @@ def create_character(name: str, profile: dict):
     settings.get_vector_dir(name).parent.mkdir(parents=True, exist_ok=True)
 
     # 初始化记忆文件
-    from .state import _default_status, _default_plans
+    from .state import _default_status
     from .memory_v3 import default_user_profile, save_user_profile, user_profile_path
     display_name = default_profile.get("name") or name
     user_profile_path(name).write_text(
@@ -91,7 +91,6 @@ def create_character(name: str, profile: dict):
         _default_status(name, profile.get("initial_outfit_tags")),
         encoding="utf-8",
     )
-    (memory_dir / "plans.md").write_text(_default_plans(name), encoding="utf-8")
 
     logger.info(f"角色 '{name}' 创建完成")
 
@@ -176,7 +175,7 @@ def reset_character_memory(name: str):
     images_dir.mkdir(parents=True, exist_ok=True)
     vector_root.mkdir(parents=True, exist_ok=True)
 
-    from .state import _default_plans, _default_status
+    from .state import _default_status
 
     display_name = get_profile(name).get("name") or name
     (memory_dir / "soul.md").write_text(_default_soul(display_name), encoding="utf-8")
@@ -185,7 +184,6 @@ def reset_character_memory(name: str):
         encoding="utf-8",
     )
     (memory_dir / "status.md").write_text(_default_status(name, reset_outfit_tags), encoding="utf-8")
-    (memory_dir / "plans.md").write_text(_default_plans(name), encoding="utf-8")
 
 
 def _reset_outfit_tags(name: str):

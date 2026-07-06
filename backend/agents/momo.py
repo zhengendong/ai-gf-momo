@@ -124,7 +124,6 @@ class MomoAgent:
                 photo_prompt=data.get("photo_prompt"),
                 state_updates=data.get("state_updates"),
                 immediate_memory=data.get("immediate_memory"),
-                plan_updates=data.get("plan_updates"),
                 persist_context=data.get("persist_context", True),
             )
         except (json.JSONDecodeError, KeyError) as e:

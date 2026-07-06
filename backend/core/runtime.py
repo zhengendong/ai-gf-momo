@@ -31,14 +31,7 @@ from ..core.memory_policy import (
 from ..core.orchestrator import bg_tasks
 from ..core.output_monitor import (
     check_output_consistency,
-    infer_missing_plan_updates,
     repair_output_consistency,
-)
-from ..core.plan_manager import (
-    PLAN_FIELDS,
-    add_plan as _add_plan,
-    close_plan as _close_plan,
-    update_plan as _update_plan,
 )
 from ..core.state import apply_state_updates
 from ..core.time_system import write_last_chat
@@ -133,7 +126,6 @@ class AgentRuntime:
             )
             if output.photo_prompt:
                 output.photo_prompt = _sanitize_photo_prompt_without_blocking(output.photo_prompt)
-            self._apply_fallback_plan_if_needed(char, content, output)
 
             consistency_started = time.perf_counter()
             output = await self._ensure_consistent_output(char, content, output)
@@ -164,10 +156,6 @@ class AgentRuntime:
             wrote_runtime_state = False
             if output.state_updates:
                 await self._async_update_state(char, output.state_updates)
-                wrote_runtime_state = True
-
-            if output.plan_updates:
-                await self._async_apply_plan_updates(char, output.plan_updates)
                 wrote_runtime_state = True
 
             if wrote_runtime_state:
@@ -272,10 +260,9 @@ class AgentRuntime:
 
     async def push_current_state(self, session_id: str, character: str):
         try:
-            from ..core.state import read_plans, read_status
+            from ..core.state import read_status
 
             status_content = read_status(character)
-            plans_content = read_plans(character)
             await self.sender.send_chunk(
                 session_id,
                 StreamChunk(
@@ -283,7 +270,6 @@ class AgentRuntime:
                     content=json.dumps({
                         "character": character,
                         "status": self._parse_status_sections(status_content, character),
-                        "plans": self._parse_plan_sections(plans_content),
                     }, ensure_ascii=False),
                 ),
                 character=character,
@@ -328,7 +314,6 @@ class AgentRuntime:
             )
             if repaired.photo_prompt:
                 repaired.photo_prompt = _sanitize_photo_prompt_without_blocking(repaired.photo_prompt)
-            self._apply_fallback_plan_if_needed(character, user_message, repaired)
             second = await check_output_consistency(
                 self.momo_agent.llm,
                 character,
@@ -347,22 +332,6 @@ class AgentRuntime:
 
         self._drop_unsafe_outfit_update(output)
         return output
-
-    def _apply_fallback_plan_if_needed(self, character: str, user_message: str, output):
-        fallback = infer_missing_plan_updates(character, user_message, output)
-        if not fallback:
-            return
-        if isinstance(output.plan_updates, dict):
-            merged = {
-                "add": list(output.plan_updates.get("add") or []),
-                "update": list(output.plan_updates.get("update") or []),
-                "close": list(output.plan_updates.get("close") or []),
-            }
-            for key in ("add", "update", "close"):
-                merged[key].extend(fallback.get(key) or [])
-            output.plan_updates = merged
-        else:
-            output.plan_updates = fallback
 
     def _drop_unsafe_outfit_update(self, output):
         updates = output.state_updates
@@ -395,35 +364,6 @@ class AgentRuntime:
                 await self.push_current_state(session_id, character)
         except Exception as e:
             logger.error("State update failed for %s: %s", character, e)
-
-    async def _async_apply_plan_updates(self, character: str, plan_updates: dict):
-        try:
-            for p in plan_updates.get("add", []) or []:
-                _add_plan(
-                    character,
-                    name=(p.get("name") or "").strip(),
-                    plan_type=p.get("type", "short"),
-                    target=p.get("target", ""),
-                    complete_when=p.get("complete_when", ""),
-                )
-            for p in plan_updates.get("update", []) or []:
-                name = (p.get("name") or "").strip()
-                if not name:
-                    continue
-                kwargs = {
-                    k: v
-                    for k, v in p.items()
-                    if k in PLAN_FIELDS and k != "name"
-                }
-                _update_plan(character, name, **kwargs)
-            for p in plan_updates.get("close", []) or []:
-                name = (p.get("name") or "").strip()
-                reason = p.get("reason", "completed")
-                if name:
-                    _close_plan(character, name, reason)
-            logger.info("Plan updates applied: %s", character)
-        except Exception as e:
-            logger.error("Plan updates failed for %s: %s", character, e)
 
     async def _async_append_long_term(self, character: str, memory: str):
         try:
@@ -517,11 +457,6 @@ class AgentRuntime:
             allowed = _state_allowed(character)
         else:
             allowed = {"穿着", "场景细节"}
-        return {k: v for k, v in sections.items() if k in allowed}
-
-    def _parse_plan_sections(self, content: str) -> dict:
-        sections = self._parse_markdown_sections(content)
-        allowed = {"当前目标", "想做的事", "长期计划", "短期计划", "其他"}
         return {k: v for k, v in sections.items() if k in allowed}
 
     def _parse_markdown_sections(self, content: str) -> dict:

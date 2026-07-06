@@ -90,12 +90,6 @@ def load_status(character: str) -> str:
     return read_status(character)
 
 
-def load_plans(character: str) -> str:
-    """加载角色 plans.md"""
-    from .state import read_plans
-    return read_plans(character)
-
-
 def load_tag_reference() -> str:
     """加载 SD 标签参考"""
     path = settings.config_dir / "tag_reference.md"
@@ -191,7 +185,6 @@ def assemble_momo_prompt(
     soul = load_soul(character)
     long_term = load_long_term(character)
     status = load_status(character)
-    plans = load_plans(character)
     include_photo_rules = should_include_photo_rules(user_message, chat_history)
     photo_rules = load_photo_rules() if include_photo_rules else ""
     char_name = profile.get("name", character)
@@ -218,10 +211,7 @@ def assemble_momo_prompt(
         "## 4. status.md（当前现实状态）",
         status or "（未填写）",
         "",
-        "## 5. plans.md（当前计划）",
-        plans or "（未填写）",
-        "",
-        "## 5.1 photo_rules.md（拍照、服饰、NSFW 状态规则）",
+        "## 5. photo_rules.md（拍照、服饰、NSFW 状态规则）",
         photo_rules or "本轮未展开完整拍照规则。若需要生图，photo_prompt 只写动作/表情/镜头/rating/画质；服饰和稳定场景必须通过 state_updates.status 更新，由工具层注入。",
         "",
         "## 6. soul.md（慢变化人格层）",

@@ -21,7 +21,7 @@ if str(ROOT) not in sys.path:
 
 from backend.config import settings
 from backend.core.orchestrator import bg_tasks
-from backend.core.state import read_plans, read_status
+from backend.core.state import read_status
 from backend.core.chat_history import read_chat_history
 from backend.core.context import load_conversation_summary
 from backend.core.runtime import AgentRuntime
@@ -126,14 +126,6 @@ def setup_temp_app(root: Path):
 ## 探针的心情状态
 - 等待测试
 """)
-    write(char_dir / "memory" / "plans.md", """# 探针的计划
-
-## 当前目标
-- 陪测试员完成测试
-
-## 想做的事
-- 保持状态链路可验证
-""")
     write(char_dir / "memory" / "chat_history.json", json.dumps({"messages": []}, ensure_ascii=False, indent=2))
 
 
@@ -172,7 +164,6 @@ async def run_case(name: str, messages: list[str], llm_outputs: list[dict | str]
     if bg_tasks.active_count:
         await asyncio.gather(*list(bg_tasks._tasks), return_exceptions=True)
     status = read_status(CHARACTER)
-    plans = read_plans(CHARACTER)
     chat_history = read_chat_history(CHARACTER)
     previews = [call["user_preview"] for call in llm.calls]
     result = {
@@ -185,7 +176,6 @@ async def run_case(name: str, messages: list[str], llm_outputs: list[dict | str]
                 ("black_tank_top" in status and "black_short_shorts" in status)
                 or ("white_cami_top" in status and "black_shorts" in status)
             ),
-            "has_active_plan": "status: active" in plans,
             "history_role_order": [m.get("role") for m in chat_history[:4]],
             "chunk_type_order": [c.type for c in sender.chunks],
             "second_prompt_has_first_turn": len(previews) >= 2 and "蓝莓" in previews[1],
@@ -198,7 +188,6 @@ async def run_case(name: str, messages: list[str], llm_outputs: list[dict | str]
             "text_chunks": [c.content for c in sender.chunks if c.type == "text"],
             "state_chunks": [json.loads(c.content) for c in sender.chunks if c.type == "state_update"],
             "status": status,
-            "plans": plans,
             "chat_history": chat_history,
             "summary": load_conversation_summary(CHARACTER),
         })
@@ -222,22 +211,6 @@ async def main():
                         "心情状态": "- 配合测试，已经完成换装",
                     }
                 },
-                "plan_updates": None,
-                "immediate_memory": None,
-                "persist_context": True,
-            }],
-        ))
-
-        # Reset state for pending-plan case.
-        setup_temp_app(Path(tmp))
-        results.append(await run_case(
-            "pending_plan_fallback",
-            ["你到底换不换"],
-            [{
-                "reply": "我这就去换，等我一下下。",
-                "photo_prompt": None,
-                "state_updates": None,
-                "plan_updates": None,
                 "immediate_memory": None,
                 "persist_context": True,
             }],
@@ -253,7 +226,6 @@ async def main():
                     "reply": "我换好了，现在穿着黑色吊带小背心和黑色短裤站在你面前。",
                     "photo_prompt": None,
                     "state_updates": None,
-                    "plan_updates": None,
                     "immediate_memory": None,
                     "persist_context": True,
                 },
@@ -266,7 +238,6 @@ async def main():
                             "心情状态": "- 换装完成",
                         }
                     },
-                    "plan_updates": None,
                     "immediate_memory": None,
                     "persist_context": True,
                 },
@@ -282,7 +253,6 @@ async def main():
                     "reply": "主人～换好啦！小樱又穿回吊带小背心和热裤了哦～是不是又变得清爽啦？",
                     "photo_prompt": None,
                     "state_updates": None,
-                    "plan_updates": None,
                     "immediate_memory": None,
                     "persist_context": True,
                 },
@@ -295,7 +265,6 @@ async def main():
                             "心情状态": "- 换回清凉服饰，等待主人确认",
                         }
                     },
-                    "plan_updates": None,
                     "immediate_memory": None,
                     "persist_context": True,
                 },
@@ -311,7 +280,6 @@ async def main():
                     "reply": "我记住了，暗号是蓝莓。",
                     "photo_prompt": None,
                     "state_updates": None,
-                    "plan_updates": None,
                     "immediate_memory": None,
                     "persist_context": True,
                 },
@@ -319,7 +287,6 @@ async def main():
                     "reply": "刚才暗号是蓝莓。",
                     "photo_prompt": None,
                     "state_updates": None,
-                    "plan_updates": None,
                     "immediate_memory": None,
                     "persist_context": True,
                 },
@@ -335,7 +302,6 @@ async def main():
                 "reply": "收到，我正常回复一句。",
                 "photo_prompt": None,
                 "state_updates": None,
-                "plan_updates": None,
                 "immediate_memory": None,
                 "persist_context": True,
             }],

@@ -509,12 +509,11 @@ async def reset_char_memory(name: str):
 @router.get("/state")
 async def get_app_state():
     from ..core.context import load_long_term, load_soul
-    from ..core.state import read_plans, read_status
+    from ..core.state import read_status
     char = get_active()
     return {
         "active_character": char,
         "has_soul": bool(load_soul(char)),
         "has_long_term": bool(load_long_term(char)),
         "has_status": bool(read_status(char)),
-        "has_plans": bool(read_plans(char)),
     }

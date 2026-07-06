@@ -21,9 +21,8 @@ class AgentOutput(BaseModel):
     """Character agent output."""
     reply: str = Field(..., description="角色的对话回复")
     photo_prompt: Optional[str] = Field(None, description="英文 Danbooru prompt，不拍照时为 null")
-    state_updates: Optional[dict] = Field(None, description="状态变更，格式: {'status': {...}, 'plans': {...}}")
+    state_updates: Optional[dict] = Field(None, description="状态变更，格式: {'status': {...}}")
     immediate_memory: Optional[str] = Field(None, description="极重要事件的一句话记录")
-    plan_updates: Optional[dict] = Field(None, description="计划变更")
     persist_context: bool = Field(True, description="是否写入上下文和记忆")
 
 

@@ -68,11 +68,6 @@ def get_status_path(character: str) -> Path:
     return settings.get_memory_dir(character) / "status.md"
 
 
-def get_plans_path(character: str) -> Path:
-    """获取角色的 plans 文件路径"""
-    return settings.get_memory_dir(character) / "plans.md"
-
-
 def get_state_snapshot_path(character: str) -> Path:
     """获取角色结构化状态快照路径。"""
     return settings.get_memory_dir(character) / "state_snapshot.json"
@@ -101,17 +96,6 @@ def read_status(character: str) -> str:
     return read_markdown(path)
 
 
-def read_plans(character: str) -> str:
-    """读取角色的当前计划"""
-    path = get_plans_path(character)
-    if not path.exists():
-        path.parent.mkdir(parents=True, exist_ok=True)
-        default = _default_plans(character)
-        write_markdown(path, default)
-        return default
-    return read_markdown(path)
-
-
 def write_status(character: str, content: str):
     """写入角色的状态"""
     path = get_status_path(character)
@@ -120,22 +104,13 @@ def write_status(character: str, content: str):
     logger.info(f"状态已更新: {character}/status.md")
 
 
-def write_plans(character: str, content: str):
-    """写入角色的计划"""
-    path = get_plans_path(character)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    write_markdown(path, content)
-    logger.info(f"计划已更新: {character}/plans.md")
-
-
 def apply_state_updates(character: str, updates: dict):
     """
     将 Agent 输出的 state_updates 应用到文件
 
     Args:
         character: 角色名
-        updates: {"status": "新的完整内容", "plans": "新的完整内容"}
-                 或 {"status": {...}, "plans": {...}}
+        updates: {"status": "新的完整内容"} 或 {"status": {...}}
     """
     if not updates:
         return
@@ -149,15 +124,6 @@ def apply_state_updates(character: str, updates: dict):
             current = read_status(character)
             merged = _deep_merge_markdown(character, current, status_val)
             write_status(character, merged)
-
-    if "plans" in updates:
-        plans_val = updates["plans"]
-        if isinstance(plans_val, str):
-            write_plans(character, plans_val)
-        elif isinstance(plans_val, dict):
-            current = read_plans(character)
-            merged = _deep_merge_markdown(character, current, plans_val)
-            write_plans(character, merged)
 
 
 def _deep_merge_markdown(character: str, current_text: str, updates: dict) -> str:
@@ -251,15 +217,3 @@ def _default_status(character: str = "momo", outfit_tags=None) -> str:
 - 等待开始新的对话
 """
 
-
-def _default_plans(character: str = "momo") -> str:
-    """默认计划"""
-    char_name = _character_name(character)
-    return f"""# {char_name}的计划
-
-## 当前目标
-- 陪用户聊天
-
-## 想做的事
-- 了解用户今天想聊什么
-"""
