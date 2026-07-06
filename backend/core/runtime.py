@@ -346,7 +346,6 @@ class AgentRuntime:
             logger.warning("Output repair failed for %s: %s", character, e)
 
         self._drop_unsafe_outfit_update(output)
-        output.photo_prompt = None
         return output
 
     def _apply_fallback_plan_if_needed(self, character: str, user_message: str, output):
