@@ -117,6 +117,26 @@ CONFLICT_GROUPS = {
     },
 }
 
+CLOSEUP_CONFLICT_TAGS = {
+    "medium_shot",
+    "wide_shot",
+    "full_body",
+    "upper_body",
+    "cowboy_shot",
+}
+
+FEET_CLOSEUP_CONFLICT_TAGS = {
+    "legs_extended",
+    "feet_forward",
+    "from_below",
+}
+
+QUALITY_TAGS = (
+    "masterpiece",
+    "best quality",
+    "amazing quality",
+)
+
 POSE_OVERRIDE_TAGS = {
     "standing",
     "sitting",
@@ -152,69 +172,37 @@ CAMERA_ACTION_RULES = [
             "lying_down",
             "legs_spread",
             "presenting_pussy",
-            "close-up",
             "pussy_focus",
         ],
-        "remove_groups": {"body_pose", "shot"},
+        "remove_groups": {"body_pose"},
     },
     {
         "name": "feet_focus",
         "triggers": {"feet_focus", "foot_focus"},
         "add": [
-            "sitting",
-            "legs_extended",
-            "feet_forward",
-            "close-up",
             "feet_focus",
-            "from_below",
         ],
-        "remove_groups": {"body_pose", "shot", "angle"},
     },
     {
         "name": "chest_focus",
         "triggers": {"chest_focus", "breast_focus"},
         "add": [
-            "upper_body",
-            "close-up",
             "chest_focus",
         ],
-        "remove_groups": {"shot"},
     },
     {
         "name": "face_focus",
         "triggers": {"face_focus"},
         "add": [
-            "close-up",
             "face_focus",
-            "looking_at_viewer",
         ],
-        "remove_groups": {"shot"},
     },
     {
         "name": "from_behind",
         "triggers": {"from_behind", "back_view"},
         "add": [
-            "on_all_fours",
-            "looking_back",
             "from_behind",
         ],
-        "remove_groups": {"body_pose", "angle"},
-    },
-    {
-        "name": "full_body",
-        "triggers": {"full_body", "wide_shot"},
-        "add": [
-            "standing",
-            "full_body",
-        ],
-        "remove_groups": {"body_pose", "shot"},
-        "skip_if": {
-            "pussy_focus",
-            "feet_focus",
-            "chest_focus",
-            "face_focus",
-            "from_behind",
-        },
     },
 ]
 
@@ -361,8 +349,16 @@ def sanitize_dynamic_photo_prompt(prompt: str) -> str:
 
 
 def normalize_camera_action_tags(prompt: str) -> str:
-    """补齐视角/动作必需标签，并删除明显冲突标签。"""
+    """Apply minimal action guardrails without overriding the LLM's camera.
+
+    The LLM owns composition tags such as close-up, from_below, upper_body,
+    full_body, and wide_shot. Backend rules only canonicalize focus aliases and
+    fix hard pose contradictions where a body-part focus would otherwise be
+    anatomically incoherent. When the LLM emits mutually redundant composition
+    tags, this keeps the tighter stated framing and removes the broader extras.
+    """
     tags = _dedupe_tags(_split_prompt_tags(prompt))
+    tags = _drop_redundant_composition_tags(tags)
     normalized = {_norm_tag(t) for t in tags}
 
     for rule in CAMERA_ACTION_RULES:
@@ -383,6 +379,22 @@ def normalize_camera_action_tags(prompt: str) -> str:
         logger.info(f"已应用视角/动作规则: {rule['name']}")
 
     return ", ".join(tags)
+
+
+def _drop_redundant_composition_tags(tags: list[str]) -> list[str]:
+    normalized = {_norm_tag(t) for t in tags}
+    has_closeup = bool(normalized & {"close-up", "closeup"})
+    if not has_closeup:
+        return tags
+
+    remove = set(CLOSEUP_CONFLICT_TAGS)
+    if "feet_focus" in normalized or "foot_focus" in normalized:
+        remove.update(FEET_CLOSEUP_CONFLICT_TAGS)
+
+    result = [tag for tag in tags if _norm_tag(tag) not in remove]
+    if len(result) != len(tags):
+        logger.info("已移除与 close-up 冲突的冗余构图标签")
+    return result
 
 
 def harmonize_pose_from_reply(prompt: str, reply: str | None = None) -> str:
@@ -443,6 +455,23 @@ def _dedupe_tags(tags: list[str]) -> list[str]:
             seen.add(norm)
             result.append(t)
     return result
+
+
+def _is_rating_tag(tag: str) -> bool:
+    return _norm_tag(tag).startswith("rating:")
+
+
+def _ensure_required_prompt_tags(prompt: str) -> str:
+    tags = _dedupe_tags(_split_prompt_tags(prompt))
+    if not any(_is_rating_tag(tag) for tag in tags):
+        default_rating = "rating:nsfw" if _has_explicit_nudity(tags) else "rating:general"
+        tags.insert(0, default_rating)
+        logger.info("最终 prompt 缺少 rating，已补齐为 %s", default_rating)
+
+    quality_norms = {_norm_tag(tag) for tag in QUALITY_TAGS}
+    tags = [tag for tag in tags if _norm_tag(tag) not in quality_norms]
+    tags.extend(QUALITY_TAGS)
+    return ", ".join(_dedupe_tags(tags))
 
 
 def _split_status_tags(raw: str) -> list[str]:
@@ -557,5 +586,6 @@ def build_image_prompt(character: str, prompt: str, reply: str | None = None) ->
             reply,
         )
     )
+    final_prompt = _ensure_required_prompt_tags(final_prompt)
     logger.info(f"最终生图 prompt 已构建: character={character}, {len(final_prompt)} 字符")
     return final_prompt

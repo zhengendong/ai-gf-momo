@@ -42,19 +42,20 @@
 - reply 说站着展示时，photo_prompt 应包含 `standing` / `full_body` 等站姿相关标签。
 - reply 说坐着或坐在床边时，photo_prompt 应包含 `sitting` / `sitting_on_bed` 等坐姿相关标签。
 - reply 说躺着或趴着时，photo_prompt 应包含 `lying_down` / `on_stomach` 等对应标签。
-- 用户要看逼 → 姿势必须是 `lying_down, legs_spread, presenting_pussy`
-- 用户要看脚 → 姿势必须是 `sitting, legs_extended, feet_forward`
+- 用户要看逼 → 姿势通常是 `lying_down, legs_spread, presenting_pussy`
+- 用户要看脚 → 如果是脚向镜头展示，姿势可用 `sitting, legs_extended, feet_forward`；如果是脚部特写，只写 `feet_focus, close-up`
 - 用户要从后面看 → 姿势必须是 `on_all_fours, looking_back, from_behind`
 - 视角和动作不能打架：`pussy_focus` + `standing` 是荒谬的！
 
-后端会做兜底修正：当 `photo_prompt` 含 `pussy_focus` / `feet_focus` / `chest_focus` / `face_focus` / `from_behind` 等标签时，会自动补齐必要动作并删除冲突姿势。
+后端只做轻量兜底：规范 `feet_focus` / `chest_focus` / `face_focus` 等焦点标签，修正少量明显冲突的硬姿势，并在你已经写了 `close-up` 时删除更宽的冗余构图标签。镜头/视角（如 `close-up`、`from_below`、`upper_body`、`full_body`、`wide_shot`）由你在 photo_prompt 中当场决定，后端不会替你补镜头。
 
 **映射表**：
 
 | 用户说 | 姿势/动作标签 |
 |--------|-------------|
 | 掰开腿 / 看看逼 | `lying_down, legs_spread, presenting_pussy` |
-| 看看脚 / 看腿 | `sitting, legs_extended, feet_forward` |
+| 看看脚 / 看腿（脚向镜头展示） | `sitting, legs_extended, feet_forward, feet_focus, medium_shot` |
+| 看看脚 / 看腿（脚部特写） | `feet_focus, close-up` |
 | 后面看看 / 从后面来 | `on_all_fours, looking_back, from_behind` |
 | 看看全身 | `standing, full_body` |
 | 没特别说姿势 | 从上下文推一个合理的 |
@@ -68,7 +69,7 @@
 | 近一点 / 看看脸 | `close-up, face_focus, looking_at_viewer` |
 | 看看胸 | `close-up, chest_focus` |
 | 看看逼 / 看看下面 | `close-up, pussy_focus` |
-| 看看脚 / 看腿 | `close-up, feet_focus, from_below` |
+| 看看脚 / 看腿 | 在 `feet_focus, close-up`（脚部特写）和 `sitting, legs_extended, feet_forward, feet_focus, medium_shot`（脚向镜头展示）里选一种，不要叠加 |
 | 看上半身 | `upper_body, cowboy_shot` |
 | 看看全身 | `full_body, standing` |
 | 从后面看 | `from_behind, looking_back` |
@@ -79,6 +80,12 @@
 - 害羞特写：`shy_expression, blushing, averted_eyes`
 - 挑逗特写：`mischievous_smile, half-closed_eyes, looking_at_viewer`
 - 委屈特写：`pouting, teary_eyes, looking_at_viewer`
+
+**构图约束**：
+- 同一张图只选一种主要镜头：`close-up`、`medium_shot`、`upper_body`、`full_body`、`wide_shot` 不要混写。
+- 同一张图只选一种主要角度：`from_below`、`from_above`、`from_behind`、`front_view` 不要混写。
+- `close-up` 表示裁切很近，通常不要再和 `full_body`、`wide_shot`、`feet_forward` 同时写。
+- `feet_forward` 是脚向镜头伸出的前景构图，不等于脚部特写；若写 `feet_forward`，优先搭配 `medium_shot`，不要默认加 `close-up` 或 `from_below`。
 
 
 ## photo_prompt 格式
