@@ -52,7 +52,6 @@ def get_time_of_day(hour: int) -> str:
     return "深夜"
 
 
-def get_greeting_hint(time_of_day: str) -> str:
     """返回时段的自然语言招呼建议"""
     return _GREETING_HINTS.get(time_of_day, "自然聊天")
 
@@ -124,7 +123,6 @@ def get_current_time_info(character: str) -> dict:
             "weekday": "周三",
             "time": "15:30",
             "time_of_day": "下午",
-            "greeting_hint": "下午问问在忙啥",
             "last_chat_at": "2026-06-17 13:00",
             "last_chat_delta": "2小时30分钟前",
             "is_first_chat": False,
@@ -140,7 +138,6 @@ def get_current_time_info(character: str) -> dict:
         "weekday": weekday,
         "time": now_local.strftime("%H:%M"),
         "time_of_day": time_of_day,
-        "greeting_hint": get_greeting_hint(time_of_day),
         "last_chat_at": "",
         "last_chat_delta": "",
         "is_first_chat": last is None,
@@ -165,7 +162,6 @@ def format_time_prompt_section(character: str) -> str:
     lines = [
         f"日期: {info['date']} {info['weekday']}",
         f"时间: {info['time']}（{info['time_of_day']}）",
-        f"招呼建议: {info['greeting_hint']}",
     ]
     if info["is_first_chat"]:
         lines.append("这是你们的第一次对话（不知道该知道些什么，自然自我介绍即可）")

@@ -1,4 +1,4 @@
-"""
+﻿"""
 Momo Agent — 实时对话
 一次 LLM 调用完成意图判断、对话生成、生图 prompt、状态更新
 """
@@ -7,8 +7,15 @@ import json
 import logging
 from typing import Optional
 
+from ..core.context import (
+    assemble_momo_prompt,
+    get_character_name,
+    load_identity,
+    load_soul,
+    load_long_term,
+    load_photo_rules,
+)
 from ..models.schemas import AgentOutput
-from ..core.context import assemble_momo_prompt, get_character_name
 from ..core.compressor import estimate_tokens, needs_compression
 from ..core.characters import get_active
 from ..utils.helpers import read_markdown
@@ -28,18 +35,41 @@ class MomoAgent:
         self._system_prompts: dict[str, str] = {}
 
     def system_prompt(self, character: str = None) -> str:
-        """加载 agent.md 作为 system prompt"""
+        """
+        构建 system prompt：
+        agent.md (协议/规则/输出格式)
+        + identity.md → ## 你的身份
+        + soul.md     → ## 你的灵魂
+        + long_term.md → ## 你的记忆
+        + photo_rules.md → ## 拍照规则
+        """
         char = character or get_active()
-        if char not in self._system_prompts:
+        cache_key = f"system:{char}"
+        if cache_key not in self._system_prompts:
             try:
-                content = read_markdown(self._agent_path)
-                # 替换 {name} 占位符
-                content = content.replace("{name}", get_character_name(char))
-                self._system_prompts[char] = content
+                base = read_markdown(self._agent_path)
+                base = base.replace("{name}", get_character_name(char))
+
+                identity = load_identity(char)
+                soul = load_soul(char)
+                long_term = load_long_term(char)
+                photo_rules = load_photo_rules()
+
+                parts = [base.strip()]
+                if identity:
+                    parts.append(f"\n\n## 你的身份\n\n{identity.strip()}")
+                if soul:
+                    parts.append(f"\n\n## 你的灵魂\n\n{soul.strip()}")
+                if long_term:
+                    parts.append(f"\n\n## 你的记忆\n\n{long_term.strip()}")
+                if photo_rules:
+                    parts.append(f"\n\n## 拍照规则\n\n{photo_rules.strip()}")
+
+                self._system_prompts[cache_key] = "\n".join(parts)
             except Exception as e:
-                logger.error(f"加载 agent.md 失败: {e}")
-                self._system_prompts[char] = f"你是{char}，一个沉浸式AI伴侣。请用JSON格式回复。"
-        return self._system_prompts[char]
+                logger.error(f"加载 system prompt 失败: {e}")
+                self._system_prompts[cache_key] = f"你是{char}，一个沉浸式AI伴侣。请用JSON格式回复。"
+        return self._system_prompts[cache_key]
 
     @property
     def _agent_path(self):
@@ -47,9 +77,9 @@ class MomoAgent:
         return settings.agent_file
 
     def reload_system_prompt(self, character: str = None):
-        """热重载 agent.md"""
+        """热重载 system prompt"""
         if character:
-            self._system_prompts.pop(character, None)
+            self._system_prompts.pop(f"system:{character}", None)
         else:
             self._system_prompts.clear()
 
@@ -115,7 +145,7 @@ class MomoAgent:
             # 去掉 <think>...</think> 推理块（Minimax M3 等推理模型）
             text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
             # 去掉可能的 markdown 代码块标记
-            if text.startswith("```"):
+            if text.startswith("`"):
                 lines = text.split("\n")
                 text = "\n".join(lines[1:-1]) if len(lines) > 2 else text
             data = json.loads(text)

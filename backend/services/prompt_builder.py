@@ -137,32 +137,7 @@ QUALITY_TAGS = (
     "amazing quality",
 )
 
-POSE_OVERRIDE_TAGS = {
-    "standing",
-    "sitting",
-    "sitting_on_bed",
-    "sitting_on_chair",
-    "sitting_on_floor",
-    "seiza",
-    "lying",
-    "lying_down",
-    "lying_on_bed",
-    "lying_down_on_bed",
-    "prone",
-    "on_stomach",
-    "kneeling",
-    "on_all_fours",
-    "all_fours",
-    "crouching",
-    "squatting",
-}
 
-REPLY_POSE_OVERRIDES = (
-    ("standing", ("站着", "站起", "站起来", "站在", "站到", "站好", "站直")),
-    ("sitting", ("坐着", "坐下", "坐在", "坐到", "坐回", "坐好")),
-    ("on_stomach", ("趴着", "趴下", "趴在", "趴好")),
-    ("lying_down", ("躺着", "躺下", "躺在", "躺到", "躺好")),
-)
 
 CAMERA_ACTION_RULES = [
     {
@@ -397,42 +372,6 @@ def _drop_redundant_composition_tags(tags: list[str]) -> list[str]:
     return result
 
 
-def harmonize_pose_from_reply(prompt: str, reply: str | None = None) -> str:
-    """Lightly replace only the explicit body pose tags when reply is clear.
-
-    This never cancels image generation and never calls the LLM. It preserves
-    the model's prompt, replacing only simple conflicting pose tags for the
-    currently supported reply poses: standing, sitting, prone/on_stomach, lying.
-    """
-    desired = _reply_pose_override(reply or "")
-    if not desired:
-        return prompt
-
-    tags = _split_prompt_tags(prompt)
-    kept = [tag for tag in tags if _norm_tag(tag) not in POSE_OVERRIDE_TAGS]
-    if desired not in {_norm_tag(tag) for tag in kept}:
-        kept.append(desired)
-    logger.info("已按回复姿势轻量替换 prompt 姿势: %s", desired)
-    return ", ".join(_dedupe_tags(kept))
-
-
-def _reply_pose_override(reply: str) -> str | None:
-    text = reply or ""
-    for tag, patterns in REPLY_POSE_OVERRIDES:
-        for pattern in patterns:
-            if pattern in text and not _is_negated_reply_pose(text, pattern):
-                return tag
-    return None
-
-
-def _is_negated_reply_pose(text: str, pattern: str) -> bool:
-    idx = text.find(pattern)
-    if idx < 0:
-        return False
-    window = text[max(0, idx - 4):idx + len(pattern) + 2]
-    return any(mark in window for mark in ("不是", "不再", "没有", "别", "不要"))
-
-
 def _split_prompt_tags(prompt: str) -> list[str]:
     return [t.strip() for t in prompt.split(",") if t.strip()]
 
@@ -579,12 +518,9 @@ def build_image_prompt(character: str, prompt: str, reply: str | None = None) ->
     clothing_tags = get_clothing_tags(character)
     parts = [p for p in [char_tags, prompt, scene_tags, clothing_tags] if p]
     final_prompt = normalize_prompt(
-        harmonize_pose_from_reply(
-            normalize_camera_action_tags(
+        normalize_camera_action_tags(
                 _harmonize_rating(", ".join(parts))
-            ),
-            reply,
-        )
+            )
     )
     final_prompt = _ensure_required_prompt_tags(final_prompt)
     logger.info(f"最终生图 prompt 已构建: character={character}, {len(final_prompt)} 字符")
