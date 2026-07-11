@@ -491,7 +491,12 @@ def _harmonize_rating(prompt: str) -> str:
     return ", ".join(fixed)
 
 
-def build_image_prompt(character: str, prompt: str, reply: str | None = None) -> str:
+def build_image_prompt(
+    character: str,
+    prompt: str,
+    reply: str | None = None,
+    state_snapshot: dict | None = None,
+) -> str:
     """
     构建最终生图 prompt。
 
@@ -514,8 +519,15 @@ def build_image_prompt(character: str, prompt: str, reply: str | None = None) ->
         body_type = ""
 
     char_tags = ", ".join(p for p in [avatar_role, body_type, appearance] if p)
-    scene_tags = get_scene_tags(character)
-    clothing_tags = get_clothing_tags(character)
+    # Background image generation must use the state committed by its own
+    # conversation turn. Reading status.md here would allow a later turn to
+    # silently change an earlier queued image.
+    if state_snapshot is None:
+        scene_tags = get_scene_tags(character)
+        clothing_tags = get_clothing_tags(character)
+    else:
+        scene_tags = ", ".join(state_snapshot.get("scene_tags") or [])
+        clothing_tags = ", ".join(state_snapshot.get("outfit_tags") or [])
     parts = [p for p in [char_tags, prompt, scene_tags, clothing_tags] if p]
     final_prompt = normalize_prompt(
         normalize_camera_action_tags(

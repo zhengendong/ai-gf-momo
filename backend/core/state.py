@@ -5,6 +5,7 @@
 
 import logging
 import json
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -85,6 +86,42 @@ def read_state_snapshot(character: str) -> dict:
         return {}
 
 
+def capture_state_snapshot(character: str) -> dict:
+    """Return a self-contained visual state snapshot for an asynchronous job."""
+    status = read_status(character)
+    previous = read_state_snapshot(character)
+    return {
+        "version": int(previous.get("version") or 0),
+        "outfit_tags": _read_section_tags(status, "穿着"),
+        "scene_tags": _read_section_tags(status, "场景细节"),
+    }
+
+
+def state_updates_from_effects(character: str, effects: list[dict]) -> dict | None:
+    """Build legacy updates from completed effects without mutating state."""
+    status_updates: dict[str, str] = {}
+    mood = _mood_section(character)
+    for effect in effects or []:
+        if not isinstance(effect, dict) or effect.get("status", "completed") != "completed":
+            continue
+        effect_type = effect.get("type")
+        if effect_type in {"replace_outfit", "outfit_change"}:
+            tags = effect.get("tags") or effect.get("outfit_tags") or effect.get("items")
+            if tags:
+                status_updates["穿着"] = _tags_to_markdown(tags)
+        elif effect_type in {"replace_scene", "scene_change", "scene_update"}:
+            tags = effect.get("tags") or effect.get("scene_tags")
+            if tags:
+                status_updates["场景细节"] = _tags_to_markdown(tags)
+        elif effect_type in {"mood_change", "mood_update"}:
+            value = effect.get("value") or effect.get("tags")
+            if value:
+                status_updates[mood] = _tags_to_markdown(value)
+    if not status_updates:
+        return None
+    return {"status": status_updates}
+
+
 def read_status(character: str) -> str:
     """读取角色的当前状态"""
     path = get_status_path(character)
@@ -124,6 +161,34 @@ def apply_state_updates(character: str, updates: dict):
             current = read_status(character)
             merged = _deep_merge_markdown(character, current, status_val)
             write_status(character, merged)
+        _write_state_snapshot(character)
+
+
+def _write_state_snapshot(character: str):
+    """Persist the machine-readable source alongside the Markdown projection."""
+    path = get_state_snapshot_path(character)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    previous = read_state_snapshot(character)
+    snapshot = capture_state_snapshot(character)
+    snapshot["version"] = int(previous.get("version") or 0) + 1
+    path.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _read_section_tags(status: str, section: str) -> list[str]:
+    match = re.search(rf"## {re.escape(section)}\n(.*?)(?=## |\Z)", status, re.DOTALL)
+    if not match:
+        return []
+    result = []
+    for line in match.group(1).splitlines():
+        value = line.strip().removeprefix("-").strip()
+        if value:
+            result.append(value)
+    return result
+
+
+def _tags_to_markdown(value) -> str:
+    values = value if isinstance(value, list) else str(value).replace(",", "\n").splitlines()
+    return "\n".join(f"- {str(tag).strip().removeprefix('-').strip()}" for tag in values if str(tag).strip())
 
 
 def _deep_merge_markdown(character: str, current_text: str, updates: dict) -> str:
@@ -216,4 +281,3 @@ def _default_status(character: str = "momo", outfit_tags=None) -> str:
 ## {char_name}的心情状态
 - 等待开始新的对话
 """
-

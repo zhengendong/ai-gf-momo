@@ -75,24 +75,6 @@ def load_status(character: str) -> str:
     return read_status(character)
 
 
-def load_tag_reference() -> str:
-    """加载 SD 标签参考"""
-    path = settings.config_dir / "tag_reference.md"
-    if path.exists():
-        content = read_markdown(path)
-        # 只用前面部分，控制 token
-        return content[:3000] if len(content) > 3000 else content
-    return ""
-
-
-def load_photo_rules() -> str:
-    """加载拍照和服饰状态规则。"""
-    path = settings.config_dir / "photo_rules.md"
-    if path.exists():
-        return read_markdown(path)
-    return ""
-
-
 def load_conversation_summary(character: str) -> str:
     """加载对话摘要（如有）"""
     path = settings.get_memory_dir(character) / "conversation_summary.md"
@@ -114,11 +96,12 @@ def assemble_momo_prompt(
     chat_history: str = "",
     conversation_summary: str = "",
     recalled_memories: str = "",
+    business_knowledge: str = "",
 ) -> str:
     """
     组装 Momo Agent 的 user prompt
 
-    system prompt 已包含：agent.md + identity.md + soul.md + long_term.md + photo_rules.md
+    system prompt 已包含：agent.md + identity.md + soul.md + long_term.md
     这里只放每轮动态变化的信息。
 
     Args:
@@ -159,6 +142,11 @@ def assemble_momo_prompt(
         parts.append("## 5. 向量召回（vector_recall，相关历史记录）")
         parts.append("以下是检索到的与当前话题相关的过往对话记录。")
         parts.append(recalled_memories)
+
+    if business_knowledge:
+        parts.append("## 本轮适用业务知识")
+        parts.append("以下知识只补充当前场景的常识、一致性和审美，不替代角色身份与自主判断。")
+        parts.append(business_knowledge)
 
     # 用户消息
     parts.append("## 6. 当前用户消息")

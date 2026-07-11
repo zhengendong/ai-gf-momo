@@ -84,7 +84,11 @@ def write(path: Path, content: str):
 def setup_temp_app(root: Path):
     settings.base_dir = root
     write(root / "config" / "agent.md", (Path(__file__).resolve().parents[1] / "config" / "agent.md").read_text(encoding="utf-8"))
-    write(root / "config" / "photo_rules.md", (Path(__file__).resolve().parents[1] / "config" / "photo_rules.md").read_text(encoding="utf-8"))
+    shutil.copytree(
+        Path(__file__).resolve().parents[1] / "config" / "knowledge",
+        root / "config" / "knowledge",
+        dirs_exist_ok=True,
+    )
     write(root / "config" / "settings.json", json.dumps({
         "active_character": CHARACTER,
         "context": {"max_tokens": 16000, "compress_at": 0.85},
@@ -204,12 +208,17 @@ async def main():
             ["换成吊带小背心和短裤，直接换好给我看"],
             [{
                 "reply": "换好了，我现在穿着黑色吊带小背心和黑色短裤站在你面前。",
-                "photo_prompt": "rating:general, standing, smile, black_tank_top, black_short_shorts, masterpiece, best quality",
-                "state_updates": {
-                    "status": {
-                        "穿着": "- black_tank_top\n- black_short_shorts\n- black_mary_jane_shoes\n- white_thighhighs",
-                        "心情状态": "- 配合测试，已经完成换装",
-                    }
+                "effects": [{
+                    "type": "replace_outfit",
+                    "status": "completed",
+                    "tags": ["black_tank_top", "black_short_shorts", "black_mary_jane_shoes", "white_thighhighs"],
+                }],
+                "image_intent": {
+                    "generate": True,
+                    "pose": ["standing"],
+                    "expression": ["smile", "looking_at_viewer"],
+                    "camera": {"shot": "full_body", "angle": "front_view"},
+                    "rating": "general",
                 },
                 "immediate_memory": None,
                 "persist_context": True,

@@ -5,6 +5,7 @@ from pathlib import Path
 
 from ..models.schemas import StreamChunk
 from ..tools.image_tool import ImageTool
+from ..core.image_job import ImageJob
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +19,15 @@ class ImagePipeline:
         self.tool = ImageTool(comfyui_service)
 
     async def generate(self, session_id: str, photo_prompt: str, character: str, reply: str = ""):
+        """Backward-compatible entry point for manual and legacy callers."""
+        from ..core.image_job import build_image_job
+
+        job = build_image_job(character, reply, legacy_prompt=photo_prompt)
+        if job:
+            await self.generate_job(session_id, job)
+
+    async def generate_job(self, session_id: str, job: ImageJob):
+        character = job.character
         try:
             await self._push(
                 session_id,
@@ -30,11 +40,7 @@ class ImagePipeline:
                 StreamChunk(type="status_update", content="正在准备生成..."),
                 character,
             )
-            workflow, prompt_used = self.tool.build_workflow(
-                character=character,
-                prompt=photo_prompt,
-                reply=reply,
-            )
+            workflow, prompt_used = self.tool.build_job_workflow(job)
 
             await self._push(
                 session_id,

@@ -1,5 +1,6 @@
 ﻿"""Agent runtime orchestration."""
 
+import asyncio
 import json
 import logging
 import time
@@ -12,7 +13,7 @@ from ..agents.image import ImagePipeline
 from ..agents.memory import MemoryAgent
 from ..agents.momo import MomoAgent
 from ..config import settings
-from ..core.chat_history import append_chat_pair
+from ..core.chat_history import append_chat_pair, read_chat_history
 from ..core.context import (
     append_daily_memory,
     assemble_momo_prompt,
@@ -28,12 +29,13 @@ from ..core.memory_policy import (
     recall_vector_context,
     reset_condense_counter,
 )
+from ..core.business_knowledge import load_relevant_knowledge
+from ..core.image_job import build_image_job
 from ..core.orchestrator import bg_tasks
 from ..core.output_monitor import (
     check_output_consistency,
-    repair_output_consistency,
 )
-from ..core.state import apply_state_updates
+from ..core.state import apply_state_updates, state_updates_from_effects
 from ..core.time_system import write_last_chat
 from ..models.schemas import StreamChunk
 from ..services.prompt_builder import sanitize_dynamic_photo_prompt
@@ -71,6 +73,7 @@ class AgentRuntime:
         self.memory_agent = MemoryAgent(llm_service)
         self.image_pipeline = ImagePipeline(comfyui_service, sender)
         self.chat_history_buffer: dict[tuple[str, str], list[str]] = {}
+        self._character_locks: dict[str, asyncio.Lock] = {}
 
     def clear_session(self, session_id: str):
         for key in list(self.chat_history_buffer):
@@ -83,6 +86,12 @@ class AgentRuntime:
                 self.chat_history_buffer.pop(key, None)
 
     async def handle_message(self, session_id: str, character: str, content: str):
+        """Serialize decisions and state commits for the same character."""
+        lock = self._character_locks.setdefault(character, asyncio.Lock())
+        async with lock:
+            await self._handle_message(session_id, character, content)
+
+    async def _handle_message(self, session_id: str, character: str, content: str):
         started_at = time.perf_counter()
         char = character
         char_name = get_character_name(char)
@@ -91,7 +100,21 @@ class AgentRuntime:
 
         try:
             history = self.chat_history_buffer.get(buffer_key, [])
-            base_prompt = assemble_momo_prompt(char, content)
+            recent_context = "\n".join(history[-6:])
+            if not recent_context:
+                persisted = read_chat_history(char)[-6:]
+                recent_context = "\n".join(
+                    str(item.get("content") or "") for item in persisted
+                )
+            business_knowledge = load_relevant_knowledge(
+                content,
+                recent_context,
+            )
+            base_prompt = assemble_momo_prompt(
+                char,
+                content,
+                business_knowledge=business_knowledge,
+            )
             context_started = time.perf_counter()
             summary, chat_history = await build_context_window(
                 self.momo_agent.llm,
@@ -118,6 +141,7 @@ class AgentRuntime:
                 chat_history=chat_history,
                 conversation_summary=summary,
                 recalled_memories=recalled_memories,
+                business_knowledge=business_knowledge,
             )
             logger.info(
                 "Runtime main LLM done: character=%s elapsed=%.3fs",
@@ -126,9 +150,11 @@ class AgentRuntime:
             )
             if output.photo_prompt:
                 output.photo_prompt = _sanitize_photo_prompt_without_blocking(output.photo_prompt)
+            if output.effects and not output.state_updates:
+                output.state_updates = state_updates_from_effects(char, output.effects)
 
             consistency_started = time.perf_counter()
-            output = await self._ensure_consistent_output(char, content, output)
+            output = await self._ensure_consistent_output(char, output)
             logger.info(
                 "Runtime consistency done: character=%s elapsed=%.3fs",
                 char,
@@ -158,6 +184,13 @@ class AgentRuntime:
                 await self._async_update_state(char, output.state_updates)
                 wrote_runtime_state = True
 
+            image_job = build_image_job(
+                char,
+                output.reply,
+                image_intent=output.image_intent,
+                legacy_prompt=output.photo_prompt,
+            )
+
             if wrote_runtime_state:
                 await self.push_current_state(session_id, char)
 
@@ -172,9 +205,12 @@ class AgentRuntime:
                     self._async_append_long_term(char, output.immediate_memory)
                 )
 
-            bg_tasks.schedule(
-                self._async_append_daily(char, content, output.reply, output.photo_prompt)
-            )
+            bg_tasks.schedule(self._async_append_daily(
+                char,
+                content,
+                output.reply,
+                image_job.dynamic_prompt if image_job else None,
+            ))
             bg_tasks.schedule(
                 self._async_append_chat_history(char, content, output.reply)
             )
@@ -189,9 +225,9 @@ class AgentRuntime:
                     self._async_condense_memory(char, trigger="turn_interval", target=target)
                 )
 
-            if output.photo_prompt:
+            if image_job:
                 bg_tasks.schedule(
-                    self.image_pipeline.generate(session_id, output.photo_prompt, char, reply=output.reply)
+                    self.image_pipeline.generate_job(session_id, image_job)
                 )
             else:
                 await self.sender.send_chunk(
@@ -283,53 +319,23 @@ class AgentRuntime:
     async def _ensure_consistent_output(
         self,
         character: str,
-        user_message: str,
         output,
     ):
         result = await check_output_consistency(
-            self.momo_agent.llm,
             character,
-            user_message,
             output,
         )
-        if result.valid or not result.needs_repair:
+        if result.valid:
             return output
 
         logger.warning("Output consistency issue for %s: %s", character, result.issues)
-        if output.photo_prompt:
-
-            logger.warning(
-                "Keeping photo_prompt despite consistency issues for %s; image generation must not be blocked.",
-                character,
-            )
-            return output
-
-        try:
-            repaired = await repair_output_consistency(
-                self.momo_agent.llm,
-                character,
-                user_message,
-                output,
-                result,
-            )
-            if repaired.photo_prompt:
-                repaired.photo_prompt = _sanitize_photo_prompt_without_blocking(repaired.photo_prompt)
-            second = await check_output_consistency(
-                self.momo_agent.llm,
-                character,
-                user_message,
-                repaired,
-            )
-            if second.valid:
-                return repaired
-            logger.warning(
-                "Output still inconsistent after repair for %s: %s",
-                character,
-                second.issues,
-            )
-        except Exception as e:
-            logger.warning("Output repair failed for %s: %s", character, e)
-
+        # A repair model adds latency and may invent a different decision. Keep
+        # the conversational result, but never generate a picture from a turn
+        # whose state relationship is inconsistent.
+        output.state_updates = None
+        output.effects = []
+        output.photo_prompt = None
+        output.image_intent = None
         return output
 
     def _format_user_facing_error(self, char_name: str, error: Exception) -> str:

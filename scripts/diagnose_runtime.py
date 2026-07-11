@@ -91,10 +91,12 @@ def diagnose_character(character: str) -> dict:
     long_term = read_text(memory_dir / "long_term.md")
     identity = read_text(char_dir / "identity.md")
     agent = read_text(ROOT / "config" / "agent.md")
-    photo_rules = read_text(ROOT / "config" / "photo_rules.md")
+    business_knowledge = "\n\n".join(
+        read_text(path) for path in sorted((ROOT / "config" / "knowledge").glob("*.md"))
+    )
     settings = read_json(SETTINGS, {})
 
-    fixed_context = "\n\n".join([agent, identity, status, photo_rules, long_term, summary])
+    fixed_context = "\n\n".join([agent, identity, status, business_knowledge, long_term, summary])
     outfit = tags(section(status, "穿着"))
     image_history = read_json(char_dir / "images" / "_history.json", [])
     prompt_warnings = []

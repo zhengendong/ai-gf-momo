@@ -54,7 +54,7 @@ npm run dev
 - **多 LLM 模型** — 后端管理 API key (`config/llm_profiles.json`)，前端运行时切换
 - **AI 自主生图** — 接本地 ComfyUI (默认 `localhost:8188`)，工作流 `waiNSFWIllustrious_v140.json`
 - **智能拍照** — LLM 自决定何时拍照，按角色当前 `status.md` 拼装 prompt
-- **服装与场景状态机** — 穿着/场景用英文 SD 标签存 `status.md`，LLM 通过 `state_updates` 维护，后端在生图时注入 prompt
+- **服装与场景状态机** — LLM 输出结构化 `effects`，后端同步 `state_snapshot.json` 与模型可读的 `status.md`
 - **持久记忆** — 每日对话归档 → 摘要压缩 → long-term → 向量召回 (ChromaDB)
 - **心跳与静默时段** — 配置 `heartbeat.quiet_start/end` 控制主动消息时段
 - **图片历史** — 按角色分组的图库 + 翻阅
@@ -96,8 +96,7 @@ AI_gf_momo/
 │
 ├── config/
 │   ├── agent.md                   # LLM system prompt + 上下文协议
-│   ├── tag_reference.md           # SD 标签速查
-│   ├── photo_rules.md             # 生图规则
+│   ├── knowledge/                 # 按需加载的全局领域业务手册
 │   ├── settings.json              # 全局配置（角色、上下文、ComfyUI、心跳、记忆）
 │   └── llm_profiles.example.json  # 多模型配置示例
 │
@@ -121,21 +120,21 @@ AI_gf_momo/
 2. `identity.md` — **不可变身份**（最高优先级，禁止被记忆覆盖）
 3. `user.json` — 用户信息（称呼、偏好）
 4. `status.md` — 当前状态（穿着/场景/心情）
-5. `plans.md` — 当前计划
-6. `soul.md` — 慢变化人格
-7. `long_term.md` — 长期关系记忆
-8. `conversation_summary.md` — 早前对话压缩摘要
-9. `chat_history` — 最近对话
-10. `vector_recall` — 向量召回的历史片段
+5. `soul.md` — 慢变化人格
+6. `long_term.md` — 长期关系记忆
+7. `conversation_summary.md` — 早前对话压缩摘要
+8. `chat_history` — 最近对话
+9. `vector_recall` — 向量召回的历史片段
+10. `config/knowledge/*.md` — 本轮按需加载的全局业务知识
 
 冲突规则：身份永远以 `identity.md` 为准；记忆里出现"我是别的角色"视为污染。
 
 ## 状态更新协议
 
-LLM 通过结构化字段修改现实状态：
+LLM 通过结构化事件修改现实状态：
 
-- `state_updates` — 改穿着 / 场景（必填英文 SD 标签，完整列出当前状态）
-- `plan_updates` — 改目标 / 计划
+- `effects` — 已经完成的换装、场景或心情事件（英文 SD 标签，完整列出最终状态）
+- `image_intent` — 只描述动作、姿势、表情、镜头、视角和 rating
 - 拒绝、犹豫、承诺未兑现 → **不更新**对应状态
 - 已在 reply 中描述的变化 → **必须**同步输出对应更新
 
@@ -149,11 +148,10 @@ LLM 通过结构化字段修改现实状态：
 
 ## 开发参考
 
-- `scripts/contract_smoke.py` — 后端契约烟雾测试
+- `scripts/backend_smoke.py` — 后端与 ComfyUI 契约烟雾测试
 - `scripts/diagnose_runtime.py` — 运行时诊断
 - `config/agent.md` — 角色对话协议和上下文组织规则
-- `config/photo_rules.md` — 生图触发和照片规则
-- `config/tag_reference.md` — 常用 SD 标签参考
+- `config/knowledge/` — 服饰、场景、摄影、亲密互动和记忆业务知识
 
 ## 隐私
 

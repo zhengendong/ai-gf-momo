@@ -9,6 +9,7 @@ from typing import Optional
 
 from ..config import settings
 from ..services.prompt_builder import build_image_prompt
+from ..core.image_job import ImageJob
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +40,23 @@ class ImageTool:
             height=height,
             character=character,
             filename_prefix=character,
+            inject_character_tags=False,
+        )
+        return workflow, final_prompt
+
+    def build_job_workflow(self, job: ImageJob) -> tuple[dict, str]:
+        """Build from a frozen job without consulting mutable runtime state."""
+        final_prompt = build_image_prompt(
+            job.character,
+            job.dynamic_prompt,
+            reply=job.reply,
+            state_snapshot=job.state_snapshot,
+        )
+        workflow = self.comfyui.build_workflow_from_template(
+            prompt=final_prompt,
+            workflow_name=job.workflow_name,
+            character=job.character,
+            filename_prefix=job.character,
             inject_character_tags=False,
         )
         return workflow, final_prompt

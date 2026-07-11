@@ -3,7 +3,7 @@ Pydantic 数据模型
 """
 
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 
 from pydantic import BaseModel, Field
 
@@ -20,6 +20,16 @@ class StreamChunk(BaseModel):
 class AgentOutput(BaseModel):
     """Character agent output."""
     reply: str = Field(..., description="角色的对话回复")
+    effects: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="本轮已经发生的结构化现实状态事件",
+    )
+    image_intent: Optional[dict[str, Any]] = Field(
+        None,
+        description="画面设计任务；不包含人物外貌、服饰、场景或质量标签",
+    )
+    # Legacy fields remain readable during migration. New prompts do not ask the
+    # model to emit them; AgentRuntime converts them into the new contracts.
     photo_prompt: Optional[str] = Field(None, description="英文 Danbooru prompt，不拍照时为 null")
     state_updates: Optional[dict] = Field(None, description="状态变更，格式: {'status': {...}}")
     immediate_memory: Optional[str] = Field(None, description="极重要事件的一句话记录")

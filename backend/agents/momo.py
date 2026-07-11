@@ -13,7 +13,6 @@ from ..core.context import (
     load_identity,
     load_soul,
     load_long_term,
-    load_photo_rules,
 )
 from ..models.schemas import AgentOutput
 from ..core.compressor import estimate_tokens, needs_compression
@@ -41,7 +40,6 @@ class MomoAgent:
         + identity.md → ## 你的身份
         + soul.md     → ## 你的灵魂
         + long_term.md → ## 你的记忆
-        + photo_rules.md → ## 拍照规则
         """
         char = character or get_active()
         cache_key = f"system:{char}"
@@ -53,7 +51,6 @@ class MomoAgent:
                 identity = load_identity(char)
                 soul = load_soul(char)
                 long_term = load_long_term(char)
-                photo_rules = load_photo_rules()
 
                 parts = [base.strip()]
                 if identity:
@@ -62,9 +59,6 @@ class MomoAgent:
                     parts.append(f"\n\n## 你的灵魂\n\n{soul.strip()}")
                 if long_term:
                     parts.append(f"\n\n## 你的记忆\n\n{long_term.strip()}")
-                if photo_rules:
-                    parts.append(f"\n\n## 拍照规则\n\n{photo_rules.strip()}")
-
                 self._system_prompts[cache_key] = "\n".join(parts)
             except Exception as e:
                 logger.error(f"加载 system prompt 失败: {e}")
@@ -90,6 +84,7 @@ class MomoAgent:
         chat_history: str = "",
         conversation_summary: str = "",
         recalled_memories: str = "",
+        business_knowledge: str = "",
     ) -> AgentOutput:
         """
         处理用户消息
@@ -112,6 +107,7 @@ class MomoAgent:
             chat_history=chat_history,
             conversation_summary=conversation_summary,
             recalled_memories=recalled_memories,
+            business_knowledge=business_knowledge,
         )
         total_tokens = estimate_tokens(system_prompt + prompt)
 
@@ -124,6 +120,7 @@ class MomoAgent:
                 chat_history="",
                 conversation_summary=conversation_summary,
                 recalled_memories=recalled_memories,
+                business_knowledge=business_knowledge,
             )
 
         # 3. 调用 LLM
@@ -151,6 +148,8 @@ class MomoAgent:
             data = json.loads(text)
             return AgentOutput(
                 reply=data.get("reply", ""),
+                effects=data.get("effects") or [],
+                image_intent=data.get("image_intent"),
                 photo_prompt=data.get("photo_prompt"),
                 state_updates=data.get("state_updates"),
                 immediate_memory=data.get("immediate_memory"),
