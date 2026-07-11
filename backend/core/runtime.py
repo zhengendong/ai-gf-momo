@@ -1,4 +1,4 @@
-"""Agent runtime orchestration."""
+﻿"""Agent runtime orchestration."""
 
 import json
 import logging
@@ -297,7 +297,7 @@ class AgentRuntime:
 
         logger.warning("Output consistency issue for %s: %s", character, result.issues)
         if output.photo_prompt:
-            self._drop_unsafe_outfit_update(output)
+
             logger.warning(
                 "Keeping photo_prompt despite consistency issues for %s; image generation must not be blocked.",
                 character,
@@ -330,21 +330,7 @@ class AgentRuntime:
         except Exception as e:
             logger.warning("Output repair failed for %s: %s", character, e)
 
-        self._drop_unsafe_outfit_update(output)
         return output
-
-    def _drop_unsafe_outfit_update(self, output):
-        updates = output.state_updates
-        if not isinstance(updates, dict):
-            return
-        status = updates.get("status")
-        if not isinstance(status, dict):
-            return
-        status.pop("穿着", None)
-        if not status:
-            updates.pop("status", None)
-        if not updates:
-            output.state_updates = None
 
     def _format_user_facing_error(self, char_name: str, error: Exception) -> str:
         if isinstance(error, httpx.HTTPStatusError):
@@ -476,3 +462,5 @@ class AgentRuntime:
         if current_title:
             sections[current_title] = "\n".join(current_lines).strip()
         return sections
+
+
