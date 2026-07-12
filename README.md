@@ -111,6 +111,7 @@ AI_gf_momo/
 2. 复制 `config/llm_profiles.example.json` 为 `config/llm_profiles.json`（首次启动后端会自动生成模板）。
 3. 启动 ComfyUI 服务（默认 `http://127.0.0.1:8188`）。
 4. `config/settings.json` 里的 `active_character` 决定启动后进入哪个角色。
+5. 开发或修改架构前，先阅读 [架构索引](docs/ARCHITECTURE_INDEX.md) 和 [项目协作约束](AGENTS.md)。
 
 ## 角色上下文协议 (config/agent.md)
 

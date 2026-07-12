@@ -1,0 +1,141 @@
+# AI_gf_momo 架构索引
+
+> 更新规则：凡修改模块职责、数据流、输出契约、配置入口、运行数据格式或验证方式，必须同步更新本文档和 `AGENTS.md` 中对应约束。
+
+## 目标与边界
+
+项目是多角色沉浸式聊天与 ComfyUI 生图应用。正常一轮对话保持一次主生成模型调用：主 Agent 负责角色决策、自然回复、已完成状态事件和画面意图；确定性后端负责状态提交、提示词组装、图片生成和持久化。
+
+角色人格属于 `characters/<character>/identity.md`，由用户维护。通用运行规则属于 `config/agent.md`，全局业务知识属于 `config/knowledge/`。
+
+## 顶层目录
+
+| 路径 | 职责 |
+| --- | --- |
+| `backend/agents/` | 对话 Agent、记忆 Agent、后台图片管线 |
+| `backend/core/` | 运行时编排、上下文、状态、记忆策略、一致性检查、业务知识路由、ImageJob |
+| `backend/services/` | LLM、ComfyUI、最终提示词组装、TTS 等服务适配 |
+| `backend/tools/` | 面向 Agent/管线的工具封装；ImageTool 将 ImageJob 编译为工作流 |
+| `backend/api/` | HTTP / WebSocket 接口 |
+| `characters/<id>/` | 角色资料、运行时状态、记忆、向量库和用户图片；不要随意改动运行数据 |
+| `config/` | 全局运行配置、主 Agent 协议、全局业务知识 |
+| `scripts/` | 诊断与离线烟雾测试 |
+| `docs/` | 架构和开发协作资料 |
+
+## 一轮消息的数据流
+
+```text
+WebSocket / API 输入
+  -> AgentRuntime.handle_message（同一角色串行锁）
+  -> 读取最近对话、状态、摘要、记忆召回
+  -> KnowledgeRouter：按需读取 config/knowledge 的全局领域手册
+  -> MomoAgent：一次主 LLM 调用
+  -> AgentOutput: reply + effects + image_intent
+  -> 本地一致性检查
+  -> effects 转 state_updates，写 status.md 并同步 state_snapshot.json
+  -> 冻结 ImageJob（本轮 reply + image_intent + 状态快照）
+  -> 立即发送文本；记忆写入和图片生成走后台任务
+  -> ImageTool：人物预设 + 冻结服饰/场景 + 画面意图 + 固定质量/负面规则
+  -> ComfyUI 工作流 -> 图片历史和 WebSocket 图片消息
+```
+
+关键入口：[AgentRuntime](../backend/core/runtime.py)、[MomoAgent](../backend/agents/momo.py)、[状态模块](../backend/core/state.py)、[ImageJob](../backend/core/image_job.py)、[提示词组装器](../backend/services/prompt_builder.py)。
+
+## 主 Agent 契约
+
+定义位于 `backend/models/schemas.py` 的 `AgentOutput`。新协议由 `config/agent.md` 约束：
+
+```json
+{
+  "reply": "角色自然回复",
+  "effects": [
+    {
+      "type": "replace_outfit",
+      "status": "completed",
+      "tags": ["完整的英文 SD 服饰标签"]
+    }
+  ],
+  "image_intent": {
+    "generate": true,
+    "pose": ["sitting_on_bed"],
+    "expression": ["slight_smile", "looking_at_viewer"],
+    "camera": {"shot": "medium_shot", "angle": "front_view"},
+    "lighting": ["warm_lighting"],
+    "rating": "general"
+  },
+  "immediate_memory": null,
+  "persist_context": true
+}
+```
+
+`effects` 只记录本轮已经完成的现实变化；用户请求、犹豫、拒绝、承诺稍后执行都不能提交状态。`image_intent` 只描述画面，不包含人物外貌、服饰、场景、画质和负面提示词。
+
+`photo_prompt` 和 `state_updates` 仍由后端模型兼容层读取，供已有模型输出和手动接口过渡使用；新提示词不再要求模型输出它们。
+
+## 状态与并发
+
+- `characters/<id>/memory/status.md`：供主 Agent 和界面读取的 Markdown 状态。
+- `characters/<id>/memory/state_snapshot.json`：每次状态写入同步更新的结构化视觉快照，包含版本、服饰和场景标签。
+- `state_updates_from_effects()`：将新协议转换为兼容写入格式。
+- `AgentRuntime` 对每个角色使用 `asyncio.Lock`，防止同一角色的两轮状态提交交错。
+
+状态写入后再创建图片任务。局部姿势、镜头和动作只属于图片，不写入持久状态。
+
+## ImageJob 与生图引擎
+
+`ImageJob` 是一次图片生成的不可变内部任务，不是新的 LLM 或子 Agent。创建时冻结：
+
+- 角色 ID；
+- 本轮回复；
+- 从 `image_intent` 编译出的动态画面标签；
+- 本轮提交后的服饰、场景和状态版本；
+- 可选工作流名称。
+
+后台任务只读取这个快照。它不会再次读取当前 `status.md`，因此后一轮换装或换场景不会污染已排队图片。
+
+最终 prompt 由 `build_image_prompt()` 统一注入：角色视觉预设、冻结服饰、冻结场景、动态画面标签、固定质量标签和负面提示词。ComfyUI 工作流仍可通过 ImageJob 的 `workflow_name` 扩展；后续接入 ANIMA 等模型时，应新增工作流/profile 适配，而不要改变主 Agent 的画面契约。
+
+## 全局业务知识与渐进加载
+
+`config/knowledge/` 是当前全角色共用的领域业务知识库，可理解为全局 Rule Packs，但按“领域手册”维护，而不是为每件衣服创建一个 Pack：
+
+| 文件 | 内容 |
+| --- | --- |
+| `router.json` | 用户输入与模糊续接时的领域触发信号；可直接调整，无需改代码 |
+| `wardrobe.md` | 换装完整性、服饰常识与审美 |
+| `scene.md` | 地点、时间、光线与场景连续性 |
+| `photography.md` | 生图时的构图、姿势、镜头和 rating 原则 |
+| `intimacy.md` | 亲密互动的连续性和状态约束 |
+| `memory.md` | 记忆使用和写入原则 |
+
+`KnowledgeRouter` 根据当前输入和必要时最近对话，加载命中的完整领域手册并写入“本轮适用业务知识”。它不调用 LLM。当前不实现角色专属知识包；未来若需要，可在该路由器之后增加“角色挂载的覆盖手册”，但不能复制全局核心规则。
+
+## 一致性与降级
+
+`output_monitor.py` 只做本地确定性检查，不调用第二个修复模型。若检测到服饰冲突、明显不完整状态或回复/状态矛盾：保留文本回复，但取消状态提交和图片生成，避免错误状态或图文不符。
+
+主 LLM 失败或输出无法解析时，保留已有的文本降级行为。不要在正常路径增加同步摘要、修复模型或生图提示词优化模型。
+
+## 维护入口
+
+| 想调整什么 | 首选位置 |
+| --- | --- |
+| 全角色通用的思考顺序、自然对话、自主性、输出 JSON | `config/agent.md` |
+| 服饰/场景/摄影/亲密互动业务规则 | `config/knowledge/<domain>.md` |
+| 哪类输入加载哪本领域手册 | `config/knowledge/router.json` |
+| 角色人格、关系、口癖 | `characters/<id>/identity.md`（仅用户明确要求时改） |
+| 结构化状态格式、状态事件解释 | `backend/core/state.py`、`backend/models/schemas.py` |
+| 画面意图到最终 prompt 的转换 | `backend/core/image_job.py`、`backend/services/prompt_builder.py` |
+| ComfyUI 工作流节点注入 | `backend/services/comfyui.py` |
+
+## 验证命令
+
+```powershell
+py -m compileall -q backend scripts
+py scripts/architecture_smoke.py
+py scripts/runtime_conversation_probe.py
+py scripts/backend_smoke.py
+git diff --check
+```
+
+`backend_smoke.py` 会检查本地 ComfyUI；其余两项不依赖真实 LLM。修改对话、状态、生图或知识路由时至少运行前三项中的相关测试。
