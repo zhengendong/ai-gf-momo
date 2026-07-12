@@ -6,7 +6,7 @@
 
 项目是多角色沉浸式聊天与 ComfyUI 生图应用。正常一轮对话保持一次主生成模型调用：主 Agent 负责角色决策、自然回复、已完成状态事件和画面意图；确定性后端负责状态提交、提示词组装、图片生成和持久化。
 
-角色人格属于 `characters/<character>/identity.md`，由用户维护。通用运行规则属于 `config/agent.md`，全局业务知识属于 `config/knowledge/`。
+角色人格属于 `characters/<character>/identity.md`，由用户维护。通用运行规则属于 `config/agent.md`，全局业务知识属于 `config/knowledge/`。历史召回和长期记忆写入是两条独立的数据链路。
 
 ## 顶层目录
 
@@ -106,9 +106,15 @@ WebSocket / API 输入
 | `scene.md` | 地点、时间、光线与场景连续性 |
 | `photography.md` | 生图时的构图、姿势、镜头和 rating 原则 |
 | `intimacy.md` | 亲密互动的连续性和状态约束 |
-| `memory.md` | 记忆使用和写入原则 |
+| `recall.md` | 已召回历史片段在本轮回复中的使用原则 |
 
 `KnowledgeRouter` 根据当前输入和必要时最近对话，加载命中的完整领域手册并写入“本轮适用业务知识”。它不调用 LLM。当前不实现角色专属知识包；未来若需要，可在该路由器之后增加“角色挂载的覆盖手册”，但不能复制全局核心规则。
+
+### 记忆的两条独立链路
+
+**历史召回**发生在主 LLM 调用之前：`memory_policy.recall_vector_context()` 根据用户输入判断是否查询向量库；命中结果作为 `vector_recall` 放进本轮上下文。`recall.md` 只告诉模型如何谨慎使用这些片段，不能写入长期记忆，也不能改变当前状态。
+
+**长期记忆写入**发生在主 LLM 返回之后：主 Agent仅在稳定且重要的事实出现时填写 `immediate_memory`；`AgentRuntime._async_append_long_term()` 才异步追加到 `long_term.md`。这不依赖向量召回，也不应因用户只是提及“上次”就自动写入。
 
 ## 一致性与降级
 

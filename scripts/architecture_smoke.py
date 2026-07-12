@@ -18,6 +18,7 @@ from backend.services.prompt_builder import build_image_prompt
 
 def main():
     assert route_domains("换套舒服的睡衣给我看看") == ["wardrobe", "photography"]
+    assert route_domains("你还记得上次吗") == ["recall"]
     assert route_domains("今天吃了什么") == []
 
     original_base = settings.base_dir
