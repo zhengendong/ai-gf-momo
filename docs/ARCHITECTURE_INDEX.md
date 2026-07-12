@@ -35,6 +35,7 @@ WebSocket / API 输入
   -> effects 转 state_updates，写 status.md 并同步 state_snapshot.json
   -> 冻结 ImageJob（本轮 reply + image_intent + 状态快照）
   -> 立即发送文本；记忆写入和图片生成走后台任务
+  -> 后台记忆实际刷新时推送静默 memory_updated 通知，前端刷新记忆页
   -> ImageTool：人物预设 + 冻结服饰/场景 + 画面意图 + 固定质量/负面规则
   -> ComfyUI 工作流 -> 图片历史和 WebSocket 图片消息
 ```
@@ -116,6 +117,8 @@ WebSocket / API 输入
 **历史召回**发生在主 LLM 调用之前：`memory_policy.recall_vector_context()` 根据用户输入判断是否查询向量库；命中结果作为 `vector_recall` 放进本轮上下文。`recall.md` 只告诉模型如何谨慎使用这些片段，不能写入长期记忆，也不能改变当前状态。
 
 **长期记忆写入**发生在主 LLM 返回之后：主 Agent只在可能稳定且重要的事实出现时填写 `memory_candidate`。运行时将它连同本轮用户消息和角色回复交给后台 `MemoryAgent.evaluate_candidate()`；MemoryAgent 二次审核、去重并在通过时刷新完整的 `long_term.md`。这不依赖向量召回，也不应因用户只是提及“上次”就自动写入。
+
+当候选审核或后台沉淀实际刷新 `long_term.md` / `soul.md` 后，运行时向当前会话发送不展示给用户的 `memory_updated` WebSocket 消息。前端“记忆”设置页仅在当前角色匹配且标签打开时重新读取相关文档。
 
 ## 一致性与降级
 

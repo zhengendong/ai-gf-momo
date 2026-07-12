@@ -182,6 +182,7 @@ async def run_case(name: str, messages: list[str], llm_outputs: list[dict | str]
             ),
             "history_role_order": [m.get("role") for m in chat_history[:4]],
             "chunk_type_order": [c.type for c in sender.chunks],
+            "memory_update_notified": any(c.type == "memory_updated" for c in sender.chunks),
             "second_prompt_has_first_turn": len(previews) >= 2 and "蓝莓" in previews[1],
             "summary_empty": not load_conversation_summary(CHARACTER).strip(),
         },
@@ -276,6 +277,25 @@ async def main():
                     },
                     "immediate_memory": None,
                     "persist_context": True,
+                },
+            ],
+        ))
+
+        setup_temp_app(Path(tmp))
+        results.append(await run_case(
+            "memory_candidate_refresh",
+            ["我一直最喜欢蓝莓"],
+            [
+                {
+                    "reply": "蓝莓啊，我记住了。",
+                    "effects": [],
+                    "image_intent": None,
+                    "memory_candidate": "用户明确表示长期喜欢蓝莓。",
+                    "persist_context": True,
+                },
+                {
+                    "should_write": True,
+                    "long_term": "# 探针的长期记忆\n\n## 用户偏好\n- 测试员明确喜欢蓝莓。\n",
                 },
             ],
         ))

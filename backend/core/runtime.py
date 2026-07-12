@@ -46,6 +46,10 @@ MAX_HISTORY_TURNS = 20
 DEFAULT_PHOTO_PROMPT = "rating:general, looking_at_viewer, masterpiece, best quality, amazing quality"
 
 
+def _has_memory_update(value) -> bool:
+    return bool(value.strip()) if isinstance(value, str) else bool(value)
+
+
 def _sanitize_photo_prompt_without_blocking(prompt: str) -> str:
     cleaned = sanitize_dynamic_photo_prompt(prompt)
     if cleaned:
@@ -205,6 +209,7 @@ class AgentRuntime:
             if memory_candidate:
                 bg_tasks.schedule(
                     self._async_evaluate_memory_candidate(
+                        session_id,
                         char,
                         memory_candidate,
                         content,
@@ -229,7 +234,12 @@ class AgentRuntime:
             if due_condense_targets:
                 target = "all" if len(due_condense_targets) > 1 else due_condense_targets[0]
                 bg_tasks.schedule(
-                    self._async_condense_memory(char, trigger="turn_interval", target=target)
+                    self._async_condense_memory(
+                        session_id,
+                        char,
+                        trigger="turn_interval",
+                        target=target,
+                    )
                 )
 
             if image_job:
@@ -280,6 +290,7 @@ class AgentRuntime:
             character=character,
         )
         result = await self._condense_memory(character, trigger="manual", target=target)
+        await self._notify_memory_updated(session_id, character, result)
         if result:
             changed = []
             if result.get("soul"):
@@ -366,6 +377,7 @@ class AgentRuntime:
 
     async def _async_evaluate_memory_candidate(
         self,
+        session_id: str,
         character: str,
         candidate: str,
         user_message: str,
@@ -381,6 +393,8 @@ class AgentRuntime:
                     reply,
                 )
             logger.info("Memory candidate processed for %s: %s", character, result)
+            if result.get("written"):
+                await self._notify_memory_updated(session_id, character, {"long_term": True})
         except Exception as e:
             logger.error("Memory candidate processing failed for %s: %s", character, e)
 
@@ -414,8 +428,15 @@ class AgentRuntime:
         except Exception as e:
             logger.error("Index vector memory failed for %s: %s", character, e)
 
-    async def _async_condense_memory(self, character: str, trigger: str = "manual", target: str = "all"):
-        await self._condense_memory(character, trigger=trigger, target=target)
+    async def _async_condense_memory(
+        self,
+        session_id: str,
+        character: str,
+        trigger: str = "manual",
+        target: str = "all",
+    ):
+        result = await self._condense_memory(character, trigger=trigger, target=target)
+        await self._notify_memory_updated(session_id, character, result)
 
     async def _condense_memory(self, character: str, trigger: str = "manual", target: str = "all"):
         try:
@@ -443,6 +464,27 @@ class AgentRuntime:
         if target == "soul":
             return bool((result.get("soul") or "").strip())
         return bool((result.get("soul") or "").strip() or (result.get("long_term") or "").strip())
+
+    async def _notify_memory_updated(
+        self,
+        session_id: str,
+        character: str,
+        result: dict | None,
+    ):
+        """Tell the client to refresh memory documents without showing a chat/status message."""
+        if not isinstance(result, dict):
+            return
+        targets = [
+            name for name in ("long_term", "soul")
+            if _has_memory_update(result.get(name))
+        ]
+        if not targets:
+            return
+        await self.sender.send_chunk(
+            session_id,
+            StreamChunk(type="memory_updated", content=",".join(targets)),
+            character=character,
+        )
 
     def _condense_target_label(self, target: str = "all") -> str:
         if target in ("long_term", "memory", "long-term", "longterm"):

@@ -98,6 +98,16 @@ export function useWebSocket() {
             window.dispatchEvent(new CustomEvent('memory-status-update', { detail: data.content }))
           }
 
+        } else if (data.type === 'memory_updated') {
+          if (typeof window !== 'undefined') {
+            window.dispatchEvent(new CustomEvent('memory-updated', {
+              detail: {
+                character: data.character || '',
+                targets: String(data.content || '').split(',').filter(Boolean)
+              }
+            }))
+          }
+
         } else if (data.type === 'done') {
           const lastMsg = messages.value[messages.value.length - 1]
           if (lastMsg && lastMsg.role === 'assistant' && lastMsg.type !== 'image_pending') {

@@ -406,10 +406,12 @@ onMounted(async () => {
   await loadProfiles()
   await loadProviders()
   window.addEventListener('memory-status-update', onMemoryStatusUpdate)
+  window.addEventListener('memory-updated', onMemoryUpdated)
 })
 
 onUnmounted(() => {
   window.removeEventListener('memory-status-update', onMemoryStatusUpdate)
+  window.removeEventListener('memory-updated', onMemoryUpdated)
 })
 
 watch(activeCharId, loadCharacterDocs)
@@ -418,6 +420,12 @@ watch(activeTab, (tab) => {
 })
 
 const onMemoryStatusUpdate = () => {
+  if (activeTab.value === '记忆') loadCharacterDocs()
+}
+
+const onMemoryUpdated = (event) => {
+  const character = event?.detail?.character
+  if (character && character !== activeCharId.value) return
   if (activeTab.value === '记忆') loadCharacterDocs()
 }
 
