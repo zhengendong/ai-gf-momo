@@ -14,7 +14,7 @@
 
 - 正常对话路径最多一次主生成模型调用；不要为规则选择或一致性修复默认增加第二次 LLM 调用。
 - `identity.md` 优先于记忆、检索结果和业务知识；业务知识只能补充常识、审美和连续性。
-- 向量召回与长期记忆写入是两条独立链路：召回只提供本轮参考，`immediate_memory` 才是异步写入 `long_term.md` 的候选；不要混用两者的规则或数据。
+- 向量召回与长期记忆写入是两条独立链路：召回只提供本轮参考；主 Agent 的 `memory_candidate` 仅是候选，必须由后台 MemoryAgent 二次审核后才能刷新 `long_term.md`。不要混用两者的规则或数据。
 - 主 Agent 输出 `reply`、已完成的 `effects` 和可选 `image_intent`；不要让它拼人物外貌、服饰、场景、质量或负面提示词。
 - `status.md` 是模型可读状态，`state_snapshot.json` 是同步的结构化快照。图片任务必须携带创建当时冻结的状态快照，后台生图禁止重新读取最新状态。
 - 状态变化必须先提交，再创建 ImageJob。图片、回复和状态不一致时，宁可不生图，也不要生成错误图片。
@@ -25,6 +25,7 @@
 - 改动架构、模块职责、数据流、关键契约、配置入口或验证方式时，必须同步更新 `docs/ARCHITECTURE_INDEX.md`。
 - 每次实现后至少运行相关的离线验证；涉及对话/状态/生图链路时运行：
   - `py scripts/architecture_smoke.py`
+  - `py scripts/memory_candidate_probe.py`
   - `py scripts/runtime_conversation_probe.py`
   - `py scripts/backend_smoke.py`（需要本地 ComfyUI）
 - 保持工作区内已有的用户改动。提交前检查 `git diff --check` 和 `git status`；不要使用破坏性的 Git 命令。

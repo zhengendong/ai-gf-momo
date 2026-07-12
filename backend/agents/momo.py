@@ -150,6 +150,7 @@ class MomoAgent:
                 reply=data.get("reply", ""),
                 effects=data.get("effects") or [],
                 image_intent=data.get("image_intent"),
+                memory_candidate=data.get("memory_candidate"),
                 photo_prompt=data.get("photo_prompt"),
                 state_updates=data.get("state_updates"),
                 immediate_memory=data.get("immediate_memory"),

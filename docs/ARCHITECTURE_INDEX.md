@@ -4,7 +4,7 @@
 
 ## 目标与边界
 
-项目是多角色沉浸式聊天与 ComfyUI 生图应用。正常一轮对话保持一次主生成模型调用：主 Agent 负责角色决策、自然回复、已完成状态事件和画面意图；确定性后端负责状态提交、提示词组装、图片生成和持久化。
+项目是多角色沉浸式聊天与 ComfyUI 生图应用。正常一轮对话保持一次主生成模型调用：主 Agent 负责角色决策、自然回复、已完成状态事件、画面意图和长期记忆候选；确定性后端负责状态提交、提示词组装、图片生成和持久化。
 
 角色人格属于 `characters/<character>/identity.md`，由用户维护。通用运行规则属于 `config/agent.md`，全局业务知识属于 `config/knowledge/`。历史召回和长期记忆写入是两条独立的数据链路。
 
@@ -30,7 +30,7 @@ WebSocket / API 输入
   -> 读取最近对话、状态、摘要、记忆召回
   -> KnowledgeRouter：按需读取 config/knowledge 的全局领域手册
   -> MomoAgent：一次主 LLM 调用
-  -> AgentOutput: reply + effects + image_intent
+  -> AgentOutput: reply + effects + image_intent + memory_candidate
   -> 本地一致性检查
   -> effects 转 state_updates，写 status.md 并同步 state_snapshot.json
   -> 冻结 ImageJob（本轮 reply + image_intent + 状态快照）
@@ -63,7 +63,7 @@ WebSocket / API 输入
     "lighting": ["warm_lighting"],
     "rating": "general"
   },
-  "immediate_memory": null,
+  "memory_candidate": null,
   "persist_context": true
 }
 ```
@@ -114,7 +114,7 @@ WebSocket / API 输入
 
 **历史召回**发生在主 LLM 调用之前：`memory_policy.recall_vector_context()` 根据用户输入判断是否查询向量库；命中结果作为 `vector_recall` 放进本轮上下文。`recall.md` 只告诉模型如何谨慎使用这些片段，不能写入长期记忆，也不能改变当前状态。
 
-**长期记忆写入**发生在主 LLM 返回之后：主 Agent仅在稳定且重要的事实出现时填写 `immediate_memory`；`AgentRuntime._async_append_long_term()` 才异步追加到 `long_term.md`。这不依赖向量召回，也不应因用户只是提及“上次”就自动写入。
+**长期记忆写入**发生在主 LLM 返回之后：主 Agent只在可能稳定且重要的事实出现时填写 `memory_candidate`。运行时将它连同本轮用户消息和角色回复交给后台 `MemoryAgent.evaluate_candidate()`；MemoryAgent 二次审核、去重并在通过时刷新完整的 `long_term.md`。这不依赖向量召回，也不应因用户只是提及“上次”就自动写入。
 
 ## 一致性与降级
 
@@ -139,6 +139,7 @@ WebSocket / API 输入
 ```powershell
 py -m compileall -q backend scripts
 py scripts/architecture_smoke.py
+py scripts/memory_candidate_probe.py
 py scripts/runtime_conversation_probe.py
 py scripts/backend_smoke.py
 git diff --check

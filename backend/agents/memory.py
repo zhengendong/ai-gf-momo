@@ -3,6 +3,7 @@ Memory Agent — 记忆沉淀
 定时或手动触发，从 daily memory 提炼精华更新 soul 和 long_term
 """
 
+import json
 import logging
 import re
 from pathlib import Path
@@ -25,6 +26,85 @@ class MemoryAgent:
 
     def __init__(self, llm_client):
         self.llm = llm_client
+
+    async def evaluate_candidate(
+        self,
+        character: str,
+        candidate: str,
+        user_message: str,
+        reply: str,
+    ) -> dict:
+        """Quietly accept or reject one candidate before refreshing long-term memory."""
+        candidate = (candidate or "").strip()
+        if not candidate:
+            return {"written": False, "reason": "empty_candidate"}
+
+        memory_dir = settings.get_memory_dir(character)
+        char_name = get_character_name(character)
+        identity = load_identity(character)
+        user_profile = render_user_profile(character)
+        long_term_path = memory_dir / "long_term.md"
+        current_long = long_term_path.read_text(encoding="utf-8") if long_term_path.exists() else ""
+
+        system = f"""你是长期记忆审核员，不参与角色对话。
+
+当前角色：{char_name}
+
+审核主 Agent 提交的一条长期记忆候选。只有同时满足以下条件才写入：
+- 是用户明确表达或本轮明确发生的事实；
+- 对未来互动有长期价值，例如稳定喜恶、称呼约定、纪念日、重大关系约定或关键里程碑；
+- 不是暂时情绪、普通聊天、单次请求、猜测、角色身份或重复内容。
+
+identity.md 是固定身份，只能作为判断依据，绝不能被候选覆盖。user.json 只描述用户。
+若候选不应记录，输出 {{"should_write": false}}。
+若应记录，输出 {{"should_write": true, "long_term": "更新后的 long_term.md 完整内容"}}。
+保留已有有效内容，合并重复项；输出简短、结构清晰的 Markdown。只输出 JSON。"""
+
+        user = f"""## identity.md（只读）
+{identity or "（空）"}
+
+## user.json（只读）
+{user_profile or "（空）"}
+
+## 当前 long_term.md
+{current_long or "（空）"}
+
+## 本轮用户消息
+{user_message}
+
+## 本轮角色回复
+{reply}
+
+## 主 Agent 提交的候选（未经验证）
+{candidate}
+"""
+
+        try:
+            raw = await self.llm.chat_prompt(system=system, user=user, temperature=0.2)
+            text = strip_model_thinking(raw)
+            if text.startswith("```"):
+                lines = text.split("\n")
+                text = "\n".join(lines[1:-1]) if len(lines) > 2 else text
+            data = json.loads(self._extract_json_object(text))
+            if not isinstance(data, dict) or not data.get("should_write"):
+                return {"written": False, "reason": "rejected"}
+
+            sanitized = self._sanitize_output(
+                character,
+                char_name,
+                {"long_term": data.get("long_term") or ""},
+            )
+            updated_long = (sanitized.get("long_term") or "").strip()
+            if not updated_long or updated_long == current_long.strip():
+                return {"written": False, "reason": "empty_or_unchanged"}
+
+            long_term_path.parent.mkdir(parents=True, exist_ok=True)
+            long_term_path.write_text(updated_long + "\n", encoding="utf-8")
+            logger.info("Memory candidate accepted and long_term.md refreshed (%s)", character)
+            return {"written": True}
+        except Exception as exc:
+            logger.warning("Memory candidate evaluation failed for %s: %s", character, exc)
+            return {"written": False, "reason": "error"}
 
     async def condense(self, character: str, days: int = 1, target: str = "all") -> dict:
         """
@@ -109,7 +189,6 @@ class MemoryAgent:
 请分析提炼，输出 JSON。"""
 
         try:
-            import json
             raw = await self.llm.chat_prompt(system=system, user=user)
 
             # 解析 JSON

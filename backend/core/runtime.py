@@ -74,6 +74,7 @@ class AgentRuntime:
         self.image_pipeline = ImagePipeline(comfyui_service, sender)
         self.chat_history_buffer: dict[tuple[str, str], list[str]] = {}
         self._character_locks: dict[str, asyncio.Lock] = {}
+        self._memory_locks: dict[str, asyncio.Lock] = {}
 
     def clear_session(self, session_id: str):
         for key in list(self.chat_history_buffer):
@@ -200,9 +201,15 @@ class AgentRuntime:
                 character=char,
             )
 
-            if output.immediate_memory:
+            memory_candidate = output.memory_candidate or output.immediate_memory
+            if memory_candidate:
                 bg_tasks.schedule(
-                    self._async_append_long_term(char, output.immediate_memory)
+                    self._async_evaluate_memory_candidate(
+                        char,
+                        memory_candidate,
+                        content,
+                        output.reply,
+                    )
                 )
 
             bg_tasks.schedule(self._async_append_daily(
@@ -357,24 +364,25 @@ class AgentRuntime:
         except Exception as e:
             logger.error("State update failed for %s: %s", character, e)
 
-    async def _async_append_long_term(self, character: str, memory: str):
+    async def _async_evaluate_memory_candidate(
+        self,
+        character: str,
+        candidate: str,
+        user_message: str,
+        reply: str,
+    ):
         try:
-            path = settings.get_memory_dir(character) / "long_term.md"
-            path.parent.mkdir(parents=True, exist_ok=True)
-            from ..core.memory_v3 import (
-                append_unique_section_lines,
-                ensure_long_term_sections,
-                is_identity_conflict_memory,
-            )
-            if is_identity_conflict_memory(character, memory):
-                logger.warning("Immediate memory dropped as identity conflict: %s", memory)
-                return
-            existing = path.read_text(encoding="utf-8") if path.exists() else ""
-            existing = ensure_long_term_sections(existing, character)
-            updated = append_unique_section_lines(existing, "重要事件", [memory])
-            path.write_text(updated, encoding="utf-8")
+            lock = self._memory_locks.setdefault(character, asyncio.Lock())
+            async with lock:
+                result = await self.memory_agent.evaluate_candidate(
+                    character,
+                    candidate,
+                    user_message,
+                    reply,
+                )
+            logger.info("Memory candidate processed for %s: %s", character, result)
         except Exception as e:
-            logger.error("Append long_term failed for %s: %s", character, e)
+            logger.error("Memory candidate processing failed for %s: %s", character, e)
 
     async def _async_append_daily(
         self,
@@ -412,7 +420,9 @@ class AgentRuntime:
     async def _condense_memory(self, character: str, trigger: str = "manual", target: str = "all"):
         try:
             days = int(memory_settings().get("condensation_days") or 1)
-            result = await self.memory_agent.condense(character, days=days, target=target)
+            lock = self._memory_locks.setdefault(character, asyncio.Lock())
+            async with lock:
+                result = await self.memory_agent.condense(character, days=days, target=target)
             if self._condense_result_has_update(result, target=target):
                 reset_condense_counter(character, trigger=trigger, target=target)
             else:

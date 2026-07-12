@@ -28,11 +28,15 @@ class AgentOutput(BaseModel):
         None,
         description="画面设计任务；不包含人物外貌、服饰、场景或质量标签",
     )
+    memory_candidate: Optional[str] = Field(
+        None,
+        description="主 Agent识别出的长期记忆候选；由后台 MemoryAgent 二次审核",
+    )
     # Legacy fields remain readable during migration. New prompts do not ask the
     # model to emit them; AgentRuntime converts them into the new contracts.
     photo_prompt: Optional[str] = Field(None, description="英文 Danbooru prompt，不拍照时为 null")
     state_updates: Optional[dict] = Field(None, description="状态变更，格式: {'status': {...}}")
-    immediate_memory: Optional[str] = Field(None, description="极重要事件的一句话记录")
+    immediate_memory: Optional[str] = Field(None, description="旧版长期记忆候选字段，兼容读取")
     persist_context: bool = Field(True, description="是否写入上下文和记忆")
 
 

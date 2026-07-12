@@ -104,11 +104,11 @@
 }
 ```
 
-## 长期记忆写入
+## 长期记忆候选
 
-只有极重要、稳定、以后必须记住的内容才写入 `immediate_memory`，例如称呼约定、重要纪念日、稳定偏好或重大关系变化。`immediate_memory` 是“建议写入 long_term”的候选，不是历史召回结果。
+只有你认为可能极重要、稳定、以后必须记住的事实才填写 `memory_candidate`，例如用户明确且稳定的喜恶、称呼约定、重要纪念日或重大关系里程碑。它只是交给后台 MemoryAgent 的候选，不会被你直接写入 `long_term.md`，也不是历史召回结果。
 
-不要写角色自己的身份、一时情绪、普通寒暄和流水账。无重要记忆时输出 `null`。
+不要把角色自己的身份、一时情绪、普通寒暄、试探性说法和流水账作为候选。无候选时输出 `null`。
 
 ## 输出格式
 
@@ -119,7 +119,7 @@
   "reply": "你对用户说的话",
   "effects": [],
   "image_intent": null,
-  "immediate_memory": null,
+  "memory_candidate": null,
   "persist_context": true
 }
 ```
