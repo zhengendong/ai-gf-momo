@@ -51,7 +51,6 @@ WebSocket / API 输入
   "effects": [
     {
       "type": "replace_outfit",
-      "status": "completed",
       "tags": ["完整的英文 SD 服饰标签"]
     }
   ],
@@ -69,6 +68,8 @@ WebSocket / API 输入
 ```
 
 `effects` 只记录本轮已经完成的现实变化；用户请求、犹豫、拒绝、承诺稍后执行都不能提交状态。`image_intent` 只描述画面，不包含人物外貌、服饰、场景、画质和负面提示词。
+
+主 Agent把一轮输出视为一个对话事务：先以 `status.md` 为起点形成角色决定和 `reply`，再从回复中提交结束后仍需成立的 `effects`，随后基于“起始状态 + effects”判断是否生成 `image_intent`，最后才提出可选 `memory_candidate`。`reply` 是本轮叙事事实基准；图片和记忆候选都不能自行创造回复与状态中不存在的新事实。坐、站、躺、转身等即时动作只属于回复和图片，不属于持久状态事件。
 
 `photo_prompt` 和 `state_updates` 仍由后端模型兼容层读取，供已有模型输出和手动接口过渡使用；新提示词不再要求模型输出它们。
 
