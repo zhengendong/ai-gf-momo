@@ -9,12 +9,15 @@ import uuid
 import asyncio
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlencode, urlsplit, urlunsplit
 
 import httpx
+import websockets
 
 from ..config import settings
 from ..core.characters import get_active
 from ..core.context import load_character_profile
+from .workflow_adapter import WorkflowAdapter, load_workflow_adapter
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +89,42 @@ class ComfyUIService:
             logger.error(f"ComfyUI 提交任务失败: {e}")
             raise
 
+    def new_client_id(self) -> str:
+        """Create the ComfyUI client id shared by submission and its socket."""
+        return str(uuid.uuid4())
+
+    async def submit_and_wait(
+        self,
+        workflow: dict,
+        max_wait: float = 180.0,
+    ) -> tuple[str, Optional[dict]]:
+        """Submit through ``/prompt`` and wait through ComfyUI's WebSocket.
+
+        The socket opens before submission, so a fast job cannot lose its
+        completion event. Final image metadata remains ComfyUI's ``/history``
+        response; image bytes are fetched afterwards from ``/view``.
+        """
+        client_id = self.new_client_id()
+        prompt_id: str | None = None
+        try:
+            async with websockets.connect(
+                self._websocket_url(client_id),
+                open_timeout=10.0,
+                close_timeout=5.0,
+                ping_interval=20.0,
+            ) as websocket:
+                prompt_id = await self.queue_prompt(workflow, client_id=client_id)
+                history = await self._wait_for_socket_completion(websocket, prompt_id, max_wait)
+                return prompt_id, history
+        except Exception:
+            # The task may have reached ComfyUI before a socket transport error.
+            # Keep one final history check, never a periodic polling fallback.
+            if prompt_id is not None:
+                history = await self.get_history(prompt_id)
+                if history is not None:
+                    return prompt_id, history
+            raise
+
     async def get_history(self, prompt_id: str) -> Optional[dict]:
         """获取任务历史"""
         client = await self._get_client()
@@ -135,34 +174,77 @@ class ComfyUIService:
         self,
         prompt_id: str,
         poll_interval: float = 1.5,
-        max_wait: float = 180.0
+        max_wait: float = 180.0,
+        client_id: str | None = None,
     ) -> Optional[dict]:
         """
-        轮询等待 ComfyUI 任务完成
+        兼容旧调用的 ComfyUI WebSocket 完成等待
 
         Args:
             prompt_id: 任务 ID
-            poll_interval: 轮询间隔（秒）
+            poll_interval: 保留的旧参数，不再用于轮询
             max_wait: 最大等待时间（秒）
 
         Returns:
             完成后的 history 数据，超时返回 None
         """
-        elapsed = 0.0
+        # ``poll_interval`` is retained only for compatibility. Completion is
+        # now driven by ComfyUI's WebSocket, with no periodic history polling.
+        del poll_interval
+        history = await self.get_history(prompt_id)
+        if history is not None:
+            return history
+        try:
+            async with websockets.connect(
+                self._websocket_url(client_id or self.new_client_id()),
+                open_timeout=10.0,
+                close_timeout=5.0,
+                ping_interval=20.0,
+            ) as websocket:
+                return await self._wait_for_socket_completion(websocket, prompt_id, max_wait)
+        except Exception as exc:
+            logger.warning("ComfyUI completion WebSocket unavailable for %s: %s", prompt_id, exc)
+            return await self.get_history(prompt_id)
 
-        while elapsed < max_wait:
-            await asyncio.sleep(poll_interval)
-            elapsed += poll_interval
+    def _websocket_url(self, client_id: str) -> str:
+        parsed = urlsplit(self.base_url)
+        scheme = "wss" if parsed.scheme == "https" else "ws"
+        path = f"{parsed.path.rstrip('/')}/ws" or "/ws"
+        return urlunsplit((scheme, parsed.netloc, path, urlencode({"clientId": client_id}), ""))
 
-            history = await self.get_history(prompt_id)
-            if history is not None:
-                logger.info(f"ComfyUI 任务完成: prompt_id={prompt_id}, 耗时={elapsed:.1f}s")
-                return history
-
-            logger.debug(f"等待 ComfyUI 任务完成: prompt_id={prompt_id}, 已等待={elapsed:.1f}s")
-
-        logger.warning(f"ComfyUI 任务超时: prompt_id={prompt_id}, max_wait={max_wait}s")
-        return None
+    async def _wait_for_socket_completion(self, websocket, prompt_id: str, max_wait: float) -> Optional[dict]:
+        """Wait for one prompt's terminal ComfyUI event without polling."""
+        try:
+            async with asyncio.timeout(max_wait):
+                while True:
+                    raw_message = await websocket.recv()
+                    if isinstance(raw_message, bytes):
+                        # The frontend intentionally continues to show only the
+                        # final image, so ComfyUI preview frames are ignored.
+                        continue
+                    try:
+                        message = json.loads(raw_message)
+                    except json.JSONDecodeError:
+                        continue
+                    data = message.get("data") or {}
+                    if data.get("prompt_id") != prompt_id:
+                        continue
+                    event_type = message.get("type")
+                    if event_type == "execution_error":
+                        error = data.get("exception_message") or data.get("exception_type") or "unknown error"
+                        raise RuntimeError(f"ComfyUI execution failed: {error}")
+                    if event_type == "execution_interrupted":
+                        raise RuntimeError("ComfyUI execution interrupted")
+                    if event_type == "executing" and data.get("node") is None:
+                        history = await self.get_history(prompt_id)
+                        if history is None:
+                            logger.error("ComfyUI completed but history is unavailable: %s", prompt_id)
+                        else:
+                            logger.info("ComfyUI task completed through WebSocket: %s", prompt_id)
+                        return history
+        except TimeoutError:
+            logger.warning("ComfyUI task timed out through WebSocket: %s", prompt_id)
+            return None
 
     async def generate_image(
         self,
@@ -183,11 +265,10 @@ class ComfyUIService:
         Returns:
             生成的图片本地路径，失败返回 None
         """
-        # 1. 提交任务
-        prompt_id = await self.queue_prompt(workflow)
-
-        # 2. 轮询等待完成
-        history = await self.wait_for_completion(prompt_id, poll_interval, max_wait)
+        # ``poll_interval`` remains in the public signature for callers that
+        # still pass it, but task completion is WebSocket-driven.
+        del poll_interval
+        prompt_id, history = await self.submit_and_wait(workflow, max_wait)
         if not history:
             logger.error(f"获取 ComfyUI 任务结果失败: {prompt_id}")
             return None
@@ -291,6 +372,9 @@ class ComfyUIService:
 
         with open(wf_path, "r", encoding="utf-8") as f:
             workflow_data = json.load(f)
+        adapter = load_workflow_adapter(wf_name)
+        if adapter is not None:
+            self._validate_adapter_nodes(adapter, workflow_data.get("nodes", []))
 
         # 旧 REST 入口可选择自动拼接角色标签；新 ImageTool 已经提前构建最终 prompt。
         char = character or get_active()
@@ -382,38 +466,72 @@ class ComfyUIService:
                     if index < len(sampler_values):
                         node_data["inputs"][input_name] = sampler_values[index]
 
-                # Seed is per-run; every other value inherits the selected
-                # workflow unless the frontend explicitly supplied an override.
-                node_data["inputs"]["seed"] = seed if seed >= 0 else random.randint(0, 2**31 - 1)
-                if steps is not None:
-                    node_data["inputs"]["steps"] = steps
-                if cfg is not None:
-                    node_data["inputs"]["cfg"] = cfg
-                if sampler is not None:
-                    node_data["inputs"]["sampler_name"] = sampler
-                if scheduler is not None:
-                    node_data["inputs"]["scheduler"] = scheduler
+                manages_sampler = adapter is None or node_id in adapter.sampler_nodes
+                if manages_sampler:
+                    # Seed is per-run; every other value inherits the selected
+                    # workflow unless the frontend explicitly supplied an override.
+                    node_data["inputs"]["seed"] = seed if seed >= 0 else random.randint(0, 2**31 - 1)
+                    if steps is not None:
+                        node_data["inputs"]["steps"] = steps
+                    if cfg is not None:
+                        node_data["inputs"]["cfg"] = cfg
+                    if sampler is not None:
+                        node_data["inputs"]["sampler_name"] = sampler
+                    if scheduler is not None:
+                        node_data["inputs"]["scheduler"] = scheduler
+                elif sampler_values:
+                    node_data["inputs"]["seed"] = sampler_values[0]
 
             elif class_type == "EmptyLatentImage":
-                if width is not None:
+                manages_size = adapter is None or node_id in adapter.latent_size_nodes
+                if manages_size and width is not None:
                     node_data["inputs"]["width"] = width
-                if height is not None:
+                if manages_size and height is not None:
                     node_data["inputs"]["height"] = height
 
             elif class_type == "SaveImage":
-                node_data["inputs"]["filename_prefix"] = filename_prefix or char
+                if adapter is None or node_id in adapter.save_image_nodes:
+                    node_data["inputs"]["filename_prefix"] = filename_prefix or char
 
             elif class_type == "CLIPTextEncode":
-                title = node.get("title", "")
-                if "负" in title or "neg" in title.lower():
-                    if negative_prompt is not None:
+                if adapter is not None:
+                    if node_id in adapter.positive_prompt_nodes:
+                        node_data["inputs"]["text"] = prompt
+                    elif node_id in adapter.negative_prompt_nodes and negative_prompt is not None:
                         node_data["inputs"]["text"] = negative_prompt
                 else:
-                    node_data["inputs"]["text"] = prompt
+                    title = node.get("title", "")
+                    if "负" in title or "neg" in title.lower():
+                        if negative_prompt is not None:
+                            node_data["inputs"]["text"] = negative_prompt
+                    else:
+                        node_data["inputs"]["text"] = prompt
 
             prompt_data[node_id] = node_data
 
         return prompt_data
+
+    @staticmethod
+    def _validate_adapter_nodes(adapter: WorkflowAdapter, nodes: list[dict]) -> None:
+        """Reject stale maps before they can silently target another node."""
+        by_id = {str(node.get("id")): node for node in nodes}
+
+        def validate(node_ids: tuple[str, ...], label: str, required_inputs: set[str], expected_type: str | None = None):
+            for node_id in node_ids:
+                node = by_id.get(node_id)
+                if node is None:
+                    raise ValueError(f"工作流节点映射缺少 {label} 节点: {node_id}")
+                if expected_type and node.get("type") != expected_type:
+                    raise ValueError(f"工作流节点映射的 {label} 节点类型不匹配: {node_id}")
+                input_names = {item.get("name") for item in node.get("inputs", [])}
+                if not required_inputs.issubset(input_names):
+                    raise ValueError(f"工作流节点映射的 {label} 节点输入不匹配: {node_id}")
+
+        validate(adapter.positive_prompt_nodes, "正向提示词", {"text"}, "CLIPTextEncode")
+        validate(adapter.negative_prompt_nodes, "负向提示词", {"text"}, "CLIPTextEncode")
+        validate(adapter.sampler_nodes, "主采样器", {"seed", "steps", "cfg", "sampler_name", "scheduler"}, "KSampler")
+        validate(adapter.latent_size_nodes, "尺寸", {"width", "height"})
+        validate(adapter.save_image_nodes, "保存图片", {"filename_prefix"}, "SaveImage")
 
     def get_task_status(self, prompt_id: str) -> dict:
         """

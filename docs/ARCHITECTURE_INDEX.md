@@ -40,8 +40,8 @@ WebSocket / API 输入
   -> 冻结 ImageJob（本轮 reply + image_intent + 状态快照）
   -> 立即发送文本；记忆写入和图片生成走后台任务
   -> 后台记忆实际刷新时推送静默 memory_updated 通知，前端刷新记忆页
-  -> ImageTool：读取 config/settings.json 的全局 comfyui 配置；从 <root_dir>/ComfyUI/user/default/workflows 读取选定工作流，注入人物预设 + 冻结服饰/场景 + 画面意图。模型、CLIP、VAE、LoRA 与未覆盖的节点参数保留工作流默认值
-  -> ComfyUI 工作流 -> 图片历史和 WebSocket 图片消息
+  -> ImageTool：读取 config/settings.json 的全局 comfyui 配置；从 <root_dir>/ComfyUI/user/default/workflows 读取选定工作流，按可选 workflow adapter 注入人物预设 + 冻结服饰/场景 + 画面意图。模型、CLIP、VAE、LoRA 与未覆盖的节点参数保留工作流默认值
+  -> ComfyUI：先连接同 client_id 的 /ws，再 POST /prompt；收到完成事件后 GET /history，再 GET /view 下载最终图 -> 图片历史和应用 WebSocket 图片消息
 ```
 
 关键入口：[AgentRuntime](../backend/core/runtime.py)、[MomoAgent](../backend/agents/momo.py)、[状态模块](../backend/core/state.py)、[ImageJob](../backend/core/image_job.py)、[提示词组装器](../backend/services/prompt_builder.py)。
@@ -100,6 +100,10 @@ WebSocket / API 输入
 
 最终 prompt 由 `build_image_prompt()` 统一注入：角色视觉预设、冻结服饰、冻结场景和动态画面标签。前端全局 `comfyui.root_dir` 是本地 ComfyUI 根目录，后端从 `<root_dir>/ComfyUI/user/default/workflows` 读取 `workflow`；该工作流决定模型链路。`negative_prompt`、采样器、调度器、步数、CFG 和尺寸留空时继承该工作流，明确填写时才覆盖对应节点。主 Agent 与 ImageJob 不携带工作流或模型选择。
 
+`config/workflow_adapters/<workflow-stem>.json` 是可选的后端维护映射，不在前端展示。它声明当前工作流的主正/负提示词、主采样器、尺寸和保存节点；存在映射时，后端仅改这些节点，避免复杂工作流的二次采样、局部提示词或修复分支被误改。映射不存在时保留旧的按节点类型自动识别行为。当前 `ANIMA_workflow.json` 已配置映射。
+
+提交任务时，`ComfyUIService.submit_and_wait()` 会先使用同一 `client_id` 连接 ComfyUI `/ws`，再请求 `/prompt`，等待 `executing(node=null)` 完成事件；随后只请求一次 `/history/{prompt_id}` 取得最终图片元数据，图片数据仍由 `/view` 获取。二进制预览帧不转发，应用前端继续显示既有的“生图中”占位与最终图片。
+
 ## 全局业务知识与渐进加载
 
 `config/knowledge/` 是当前全角色共用的领域业务知识库，可理解为全局 Rule Packs，但按“领域手册”维护，而不是为每件衣服创建一个 Pack：
@@ -140,6 +144,7 @@ WebSocket / API 输入
 | 结构化状态格式、状态事件解释 | `backend/core/state.py`、`backend/models/schemas.py` |
 | 画面意图到最终 prompt 的转换 | `backend/core/image_job.py`、`backend/services/prompt_builder.py` |
 | ComfyUI 工作流节点注入 | `backend/services/comfyui.py` |
+| 复杂工作流的受控节点映射 | `config/workflow_adapters/<workflow-stem>.json` |
 
 ## 验证命令
 
@@ -149,6 +154,8 @@ py scripts/architecture_smoke.py
 py scripts/memory_candidate_probe.py
 py scripts/runtime_conversation_probe.py
 py scripts/generation_settings_probe.py
+py scripts/workflow_adapter_probe.py
+py scripts/comfyui_transport_probe.py
 py scripts/backend_smoke.py
 git diff --check
 ```

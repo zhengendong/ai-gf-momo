@@ -1,0 +1,7 @@
+{
+  "workflow": "ANIMA_workflow.json",
+  "positive_prompt_nodes": ["11"],
+  "negative_prompt_nodes": ["12"],
+  "sampler_nodes": ["19"],
+  "latent_size_nodes": ["28"]
+}

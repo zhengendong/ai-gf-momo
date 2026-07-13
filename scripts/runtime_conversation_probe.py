@@ -58,6 +58,9 @@ class FakeComfy:
     async def queue_prompt(self, workflow):
         return "fake_prompt_id"
 
+    async def submit_and_wait(self, workflow, *args, **kwargs):
+        return "fake_prompt_id", {"outputs": {"1": {"images": [{"filename": "probe.png", "subfolder": ""}]}}}
+
     async def wait_for_completion(self, prompt_id, *args, **kwargs):
         return {"outputs": {"1": {"images": [{"filename": "probe.png", "subfolder": ""}]}}}
 

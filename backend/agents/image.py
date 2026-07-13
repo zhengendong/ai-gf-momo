@@ -47,15 +47,12 @@ class ImagePipeline:
                 StreamChunk(type="status_update", content="正在提交任务..."),
                 character,
             )
-            prompt_id = await self.comfyui.queue_prompt(workflow)
-
             await self._push(
                 session_id,
                 StreamChunk(type="status_update", content="正在生成图片..."),
                 character,
             )
-            history = await self.comfyui.wait_for_completion(prompt_id)
-
+            prompt_id, history = await self.comfyui.submit_and_wait(workflow)
             if not history:
                 await self._push(
                     session_id,

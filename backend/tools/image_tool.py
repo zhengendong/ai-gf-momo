@@ -106,8 +106,7 @@ class ImageTool:
             workflow_name=workflow_name,
             negative_prompt=negative_prompt,
         )
-        prompt_id = await self.comfyui.queue_prompt(workflow)
-        history = await self.comfyui.wait_for_completion(prompt_id)
+        prompt_id, history = await self.comfyui.submit_and_wait(workflow)
         if not history:
             logger.error(f"ComfyUI 任务未完成: {prompt_id}")
             return None

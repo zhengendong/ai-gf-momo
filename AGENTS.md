@@ -18,7 +18,8 @@
 - 主 Agent 输出 `reply`、已完成的 `effects` 和可选 `image_intent`；不要让它拼人物外貌、服饰、场景、质量或负面提示词。
 - `status.md` 是模型可读状态，`state_snapshot.json` 是同步的结构化快照。图片任务必须携带创建当时冻结的状态快照，后台生图禁止重新读取最新状态。
 - 状态变化必须先提交，再创建 ImageJob。图片、回复和状态不一致时，宁可不生图，也不要生成错误图片。
-- 生图工作流、模型和可选覆盖参数由后端读取 `config/settings.json` 的全局 `comfyui` 配置；`root_dir` 是本地 ComfyUI 根目录，工作流从 `<root_dir>/ComfyUI/user/default/workflows` 读取。主 Agent 只输出画面意图，不选择工作流或模型。前端空值表示继承所选工作流节点的默认值，只有明确填写的值才可覆盖。
+- 生图工作流、模型和可选覆盖参数由后端读取 `config/settings.json` 的全局 `comfyui` 配置；`root_dir` 是本地 ComfyUI 根目录，工作流从 `<root_dir>/ComfyUI/user/default/workflows` 读取。主 Agent 只输出画面意图，不选择工作流或模型。前端空值表示继承所选工作流节点的默认值，只有明确填写的值才可覆盖。复杂工作流的受控节点由 `config/workflow_adapters/<workflow-stem>.json` 声明；有映射时只能修改映射节点，不能再按类型批量覆盖。
+- ComfyUI 生图使用同一 `client_id` 的 `/ws` 完成事件等待，不得恢复为固定间隔轮询 `/history`。完成事件后只读取一次 `/history/{prompt_id}` 获取输出元数据，再通过 `/view` 下载最终图片；二进制预览帧不改变当前前端展示。
 - 全局业务知识位于 `config/knowledge/`；调整触发条件优先改 `router.json`，调整业务原则优先改对应领域 Markdown，不要把领域规则重新塞回 `agent.md`。
 - 后端端口的唯一配置来源是根目录 `.env` 的 `SERVER_PORT`；不要在启动脚本、前端代理或代码中重新写死业务端口。
 
@@ -29,5 +30,7 @@
   - `py scripts/architecture_smoke.py`
   - `py scripts/memory_candidate_probe.py`
   - `py scripts/runtime_conversation_probe.py`
+  - `py scripts/workflow_adapter_probe.py`
+  - `py scripts/comfyui_transport_probe.py`
   - `py scripts/backend_smoke.py`（需要本地 ComfyUI）
 - 保持工作区内已有的用户改动。提交前检查 `git diff --check` 和 `git status`；不要使用破坏性的 Git 命令。
