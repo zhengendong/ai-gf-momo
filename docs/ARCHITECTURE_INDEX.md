@@ -22,6 +22,10 @@
 | `scripts/` | 诊断与离线烟雾测试 |
 | `docs/` | 架构和开发协作资料 |
 
+## 服务地址与端口
+
+根目录 `.env` 的 `SERVER_PORT` 是后端端口唯一配置来源，默认后端绑定 `127.0.0.1:8001`。`启动.bat` 用它清理旧后端并启动 `python -m backend.main`；开发模式下 `frontend/vite.config.js` 读取同一份 `.env`，将 `/api`、`/ws` 和 `/static` 代理到该端口。以后只改 `.env` 的 `SERVER_PORT`，然后重启后端和 Vite。
+
 ## 一轮消息的数据流
 
 ```text

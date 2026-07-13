@@ -96,7 +96,7 @@ if frontend_dir.exists():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(
-        "main:app",
+        "backend.main:app",
         host=settings.server.host,
         port=settings.server.port,
         reload=settings.server.reload

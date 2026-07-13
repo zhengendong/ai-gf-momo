@@ -44,8 +44,8 @@ class ComfyUIConfig(BaseSettings):
 
 class ServerConfig(BaseSettings):
     """服务器配置"""
-    host: str = Field(default="0.0.0.0", description="服务器主机")
-    port: int = Field(default=8000, description="服务器端口")
+    host: str = Field(default="127.0.0.1", description="服务器主机")
+    port: int = Field(default=8001, description="服务器端口")
     reload: bool = Field(default=True, description="开发模式自动重载")
     cors_origins: list[str] = Field(default=["http://localhost:5173", "http://localhost:3000"], description="CORS 允许的来源")
 

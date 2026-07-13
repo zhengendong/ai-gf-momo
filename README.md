@@ -11,7 +11,7 @@
     ├── HTTP/REST  ── 图片、设置、状态、历史
     └── WebSocket  ── 流式对话
                 │
-           FastAPI 后端 (uvicorn :8000)
+           FastAPI 后端（端口由 .env 的 SERVER_PORT 指定）
                 │
        ┌────────┼─────────┐
        ↓        ↓         ↓
@@ -25,17 +25,17 @@
 双击 `启动.bat`，脚本会：
 1. 自动装 Python 依赖 (`requirements.txt`)
 2. 必要时装前端依赖 (`npm install`)
-3. 杀掉占用 8000 端口的旧 uvicorn
-4. 启动后端 (`http://127.0.0.1:8000`)
+3. 按 `.env` 的 `SERVER_PORT` 杀掉同端口旧后端
+4. 启动后端（默认 `http://127.0.0.1:8001`）
 5. 启动前端 (`http://localhost:5173`)
 6. 自动打开浏览器
 
 ## 手动启动
 
 ```bash
-# 后端
+# 后端（读取根目录 .env 的 SERVER_HOST / SERVER_PORT）
 pip install -r requirements.txt
-uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000
+py -3.14 -m backend.main
 
 # 前端
 cd frontend
@@ -112,6 +112,7 @@ AI_gf_momo/
 3. 启动 ComfyUI 服务（默认 `http://127.0.0.1:8188`）。
 4. `config/settings.json` 里的 `active_character` 决定启动后进入哪个角色。
 5. 开发或修改架构前，先阅读 [架构索引](docs/ARCHITECTURE_INDEX.md) 和 [项目协作约束](AGENTS.md)。
+6. 后端地址只改根目录 `.env` 的 `SERVER_PORT`（当前为 `8001`）；启动脚本与前端 Vite 代理会自动使用该值。
 
 ## 角色上下文协议 (config/agent.md)
 
