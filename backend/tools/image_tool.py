@@ -9,6 +9,7 @@ from typing import Optional
 
 from ..config import settings
 from ..services.prompt_builder import build_image_prompt
+from ..services.generation_settings import load_generation_settings
 from ..core.image_job import ImageJob
 
 logger = logging.getLogger(__name__)
@@ -28,16 +29,21 @@ class ImageTool:
         width: int = None,
         height: int = None,
         workflow_name: str = None,
-        negative_prompt: str = "",
+        negative_prompt: str | None = None,
     ) -> tuple[dict, str]:
         """构建 ComfyUI workflow，返回 workflow 和实际使用的最终 prompt。"""
+        profile = load_generation_settings()
         final_prompt = build_image_prompt(character, prompt, reply=reply)
         workflow = self.comfyui.build_workflow_from_template(
             prompt=final_prompt,
-            negative_prompt=negative_prompt,
-            workflow_name=workflow_name,
-            width=width,
-            height=height,
+            negative_prompt=negative_prompt if negative_prompt is not None else profile.negative_prompt,
+            workflow_name=workflow_name or profile.workflow,
+            width=width if width is not None else profile.width,
+            height=height if height is not None else profile.height,
+            steps=profile.steps,
+            cfg=profile.cfg,
+            sampler=profile.sampler,
+            scheduler=profile.scheduler,
             character=character,
             filename_prefix=character,
             inject_character_tags=False,
@@ -52,9 +58,17 @@ class ImageTool:
             reply=job.reply,
             state_snapshot=job.state_snapshot,
         )
+        profile = load_generation_settings()
         workflow = self.comfyui.build_workflow_from_template(
             prompt=final_prompt,
-            workflow_name=job.workflow_name,
+            negative_prompt=profile.negative_prompt,
+            workflow_name=profile.workflow,
+            width=profile.width,
+            height=profile.height,
+            steps=profile.steps,
+            cfg=profile.cfg,
+            sampler=profile.sampler,
+            scheduler=profile.scheduler,
             character=job.character,
             filename_prefix=job.character,
             inject_character_tags=False,
@@ -69,7 +83,7 @@ class ImageTool:
         width: int = None,
         height: int = None,
         workflow_name: str = None,
-        negative_prompt: str = "",
+        negative_prompt: str | None = None,
     ) -> Optional[dict]:
         """
         完整生图：构建 workflow -> 提交 -> 等待 -> 保存 -> 记录历史。

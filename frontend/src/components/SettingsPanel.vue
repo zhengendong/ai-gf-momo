@@ -107,20 +107,22 @@
         </div>
         <div class="form-field">
           <label>负面提示词</label>
-          <textarea v-model="settings.comfyui.negative_prompt" rows="2"></textarea>
+          <textarea v-model="settings.comfyui.negative_prompt" rows="2" placeholder="留空则使用工作流默认值"></textarea>
         </div>
         <div class="form-row">
-          <div class="form-field"><label>采样器</label><input v-model="settings.comfyui.sampler" /></div>
-          <div class="form-field"><label>调度器</label><input v-model="settings.comfyui.scheduler" /></div>
+          <div class="form-field"><label>采样器</label><input v-model="settings.comfyui.sampler" placeholder="留空则使用工作流默认值" /></div>
+          <div class="form-field"><label>调度器</label><input v-model="settings.comfyui.scheduler" placeholder="留空则使用工作流默认值" /></div>
         </div>
         <div class="form-row">
-          <div class="form-field"><label>步数</label><input v-model.number="settings.comfyui.steps" type="number" /></div>
-          <div class="form-field"><label>CFG</label><input v-model.number="settings.comfyui.cfg" type="number" step="0.5" /></div>
+          <div class="form-field"><label>步数</label><input v-model.number="settings.comfyui.steps" type="number" placeholder="继承" /></div>
+          <div class="form-field"><label>CFG</label><input v-model.number="settings.comfyui.cfg" type="number" step="0.5" placeholder="继承" /></div>
         </div>
         <div class="form-row">
-          <div class="form-field"><label>宽度</label><input v-model.number="settings.comfyui.width" type="number" /></div>
-          <div class="form-field"><label>高度</label><input v-model.number="settings.comfyui.height" type="number" /></div>
+          <div class="form-field"><label>宽度</label><input v-model.number="settings.comfyui.width" type="number" placeholder="继承" /></div>
+          <div class="form-field"><label>高度</label><input v-model.number="settings.comfyui.height" type="number" placeholder="继承" /></div>
         </div>
+        <p class="field-hint">除工作流外，留空表示继承所选工作流的节点默认值。</p>
+        <button @click="resetComfyuiOverrides" class="cancel-btn">恢复工作流默认参数</button>
         <button @click="saveComfyui" class="save-btn">保存设置</button>
       </div>
 
@@ -258,13 +260,13 @@ const settings = reactive({
   context: { max_tokens: 16000, compress_at: 0.85 },
   comfyui: {
     workflow: 'waiNSFWIllustrious_v140.json',
-    negative_prompt: 'bad quality,worst quality,worst detail,sketch,censor',
-    sampler: 'euler',
-    scheduler: 'simple',
-    steps: 20,
-    cfg: 5.0,
-    width: 1024,
-    height: 1024
+    negative_prompt: null,
+    sampler: null,
+    scheduler: null,
+    steps: null,
+    cfg: null,
+    width: null,
+    height: null
   },
   memory: {
     condensation_days: 1,
@@ -508,12 +510,47 @@ const saveGeneral = async () => {
 }
 
 const saveComfyui = async () => {
+  const comfyui = normalizeComfyuiOverrides()
   await fetch(`${API}/settings`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ comfyui: settings.comfyui })
+    body: JSON.stringify({ comfyui })
   })
+  Object.assign(settings.comfyui, comfyui)
   showSaved()
+}
+
+const normalizeComfyuiOverrides = () => {
+  const source = settings.comfyui || {}
+  const optionalText = (value) => String(value ?? '').trim() || null
+  const optionalNumber = (value) => {
+    if (value === '' || value === null || value === undefined) return null
+    const number = Number(value)
+    return Number.isFinite(number) ? number : null
+  }
+  return {
+    workflow: optionalText(source.workflow) || 'waiNSFWIllustrious_v140.json',
+    negative_prompt: optionalText(source.negative_prompt),
+    sampler: optionalText(source.sampler),
+    scheduler: optionalText(source.scheduler),
+    steps: optionalNumber(source.steps),
+    cfg: optionalNumber(source.cfg),
+    width: optionalNumber(source.width),
+    height: optionalNumber(source.height)
+  }
+}
+
+const resetComfyuiOverrides = async () => {
+  Object.assign(settings.comfyui, {
+    negative_prompt: null,
+    sampler: null,
+    scheduler: null,
+    steps: null,
+    cfg: null,
+    width: null,
+    height: null
+  })
+  await saveComfyui()
 }
 
 const saveMemorySettings = async () => {

@@ -10,6 +10,7 @@ from fastapi import APIRouter, HTTPException
 from ..config import settings
 from ..models.schemas import ImageGenerationRequest, ImageGenerationResponse
 from ..services.comfyui import comfyui_service
+from ..services.generation_settings import load_generation_settings
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -83,10 +84,17 @@ async def generate_image(request: ImageGenerationRequest):
         width, height = _get_dimensions(aspect_ratio)
 
         # 4. 构建工作流
+        profile = load_generation_settings()
         workflow = comfyui_service.build_workflow_from_template(
             prompt=prompt,
-            width=width,
-            height=height
+            negative_prompt=profile.negative_prompt,
+            workflow_name=profile.workflow,
+            width=width if width is not None else profile.width,
+            height=height if height is not None else profile.height,
+            steps=profile.steps,
+            cfg=profile.cfg,
+            sampler=profile.sampler,
+            scheduler=profile.scheduler,
         )
 
         # 5. 生成图片

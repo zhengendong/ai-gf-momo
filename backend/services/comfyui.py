@@ -243,11 +243,15 @@ class ComfyUIService:
     def build_workflow_from_template(
         self,
         prompt: str,
-        negative_prompt: str = "",
+        negative_prompt: str | None = None,
         workflow_name: str = None,
         seed: int = -1,
         width: int = None,
         height: int = None,
+        steps: int | None = None,
+        cfg: float | None = None,
+        sampler: str | None = None,
+        scheduler: str | None = None,
         character: str = None,
         filename_prefix: str = None,
         inject_character_tags: bool = True,
@@ -276,6 +280,8 @@ class ComfyUIService:
         # 工作流目录
         workflow_dir = Path("D:/ComfyUI/ComfyUI/user/default/workflows")
         wf_name = workflow_name or "waiNSFWIllustrious_v140.json"
+        if Path(wf_name).name != wf_name:
+            raise ValueError("工作流名称只能是 workflows 目录中的文件名")
         wf_path = workflow_dir / wf_name
 
         if not wf_path.exists():
@@ -352,14 +358,39 @@ class ComfyUIService:
 
             # 覆盖特定输入（用户可控的参数）
             if class_type == "KSampler":
-                # 直接设置所有 KSampler 参数，不依赖 widgets_values 映射
-                # （KSampler 的 widgets_values 含 UI 控件如 "randomize"，位置映射会错位）
+                # Current ComfyUI exports an extra seed-control widget (such
+                # as ``randomize``) after the seed. It is not represented in
+                # node inputs, so a positional generic widget map shifts all
+                # following KSampler defaults by one. Restore the real node
+                # defaults before applying optional frontend overrides.
+                sampler_values = widgets_values
+                has_seed_control = (
+                    len(sampler_values) >= 7
+                    and isinstance(sampler_values[1], str)
+                    and sampler_values[1] in {"fixed", "increment", "decrement", "randomize"}
+                )
+                indexes = {
+                    "steps": 2 if has_seed_control else 1,
+                    "cfg": 3 if has_seed_control else 2,
+                    "sampler_name": 4 if has_seed_control else 3,
+                    "scheduler": 5 if has_seed_control else 4,
+                    "denoise": 6 if has_seed_control else 5,
+                }
+                for input_name, index in indexes.items():
+                    if index < len(sampler_values):
+                        node_data["inputs"][input_name] = sampler_values[index]
+
+                # Seed is per-run; every other value inherits the selected
+                # workflow unless the frontend explicitly supplied an override.
                 node_data["inputs"]["seed"] = seed if seed >= 0 else random.randint(0, 2**31 - 1)
-                node_data["inputs"]["steps"] = settings.comfyui.steps
-                node_data["inputs"]["cfg"] = settings.comfyui.cfg
-                node_data["inputs"]["sampler_name"] = settings.comfyui.sampler
-                node_data["inputs"]["scheduler"] = settings.comfyui.scheduler
-                node_data["inputs"]["denoise"] = 1.0
+                if steps is not None:
+                    node_data["inputs"]["steps"] = steps
+                if cfg is not None:
+                    node_data["inputs"]["cfg"] = cfg
+                if sampler is not None:
+                    node_data["inputs"]["sampler_name"] = sampler
+                if scheduler is not None:
+                    node_data["inputs"]["scheduler"] = scheduler
 
             elif class_type == "EmptyLatentImage":
                 if width is not None:
@@ -373,7 +404,8 @@ class ComfyUIService:
             elif class_type == "CLIPTextEncode":
                 title = node.get("title", "")
                 if "负" in title or "neg" in title.lower():
-                    node_data["inputs"]["text"] = negative_prompt or "bad quality,worst quality,worst detail,sketch,censor"
+                    if negative_prompt is not None:
+                        node_data["inputs"]["text"] = negative_prompt
                 else:
                     node_data["inputs"]["text"] = prompt
 

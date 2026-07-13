@@ -40,7 +40,7 @@ WebSocket / API 输入
   -> 冻结 ImageJob（本轮 reply + image_intent + 状态快照）
   -> 立即发送文本；记忆写入和图片生成走后台任务
   -> 后台记忆实际刷新时推送静默 memory_updated 通知，前端刷新记忆页
-  -> ImageTool：人物预设 + 冻结服饰/场景 + 画面意图 + 固定质量/负面规则
+  -> ImageTool：读取 config/settings.json 的全局 comfyui 配置，选定工作流；注入人物预设 + 冻结服饰/场景 + 画面意图。模型、CLIP、VAE、LoRA 与未覆盖的节点参数保留工作流默认值
   -> ComfyUI 工作流 -> 图片历史和 WebSocket 图片消息
 ```
 
@@ -95,11 +95,10 @@ WebSocket / API 输入
 - 本轮回复；
 - 从 `image_intent` 编译出的动态画面标签；
 - 本轮提交后的服饰、场景和状态版本；
-- 可选工作流名称。
 
 后台任务只读取这个快照。它不会再次读取当前 `status.md`，因此后一轮换装或换场景不会污染已排队图片。
 
-最终 prompt 由 `build_image_prompt()` 统一注入：角色视觉预设、冻结服饰、冻结场景、动态画面标签、固定质量标签和负面提示词。ComfyUI 工作流仍可通过 ImageJob 的 `workflow_name` 扩展；后续接入 ANIMA 等模型时，应新增工作流/profile 适配，而不要改变主 Agent 的画面契约。
+最终 prompt 由 `build_image_prompt()` 统一注入：角色视觉预设、冻结服饰、冻结场景和动态画面标签。工作流选择及参数覆盖由前端全局 `comfyui` 配置控制：`workflow` 决定模型链路；`negative_prompt`、采样器、调度器、步数、CFG 和尺寸留空时继承该工作流，明确填写时才覆盖对应节点。主 Agent 与 ImageJob 不携带工作流或模型选择。
 
 ## 全局业务知识与渐进加载
 
@@ -149,6 +148,7 @@ py -m compileall -q backend scripts
 py scripts/architecture_smoke.py
 py scripts/memory_candidate_probe.py
 py scripts/runtime_conversation_probe.py
+py scripts/generation_settings_probe.py
 py scripts/backend_smoke.py
 git diff --check
 ```

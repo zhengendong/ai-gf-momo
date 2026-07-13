@@ -16,7 +16,6 @@ class ImageJob:
     reply: str
     dynamic_prompt: str
     state_snapshot: dict[str, Any]
-    workflow_name: str | None = None
 
 
 def build_image_job(
@@ -40,7 +39,6 @@ def build_image_job(
         reply=reply,
         dynamic_prompt=dynamic_prompt,
         state_snapshot=capture_state_snapshot(character),
-        workflow_name=(image_intent or {}).get("workflow"),
     )
 
 
