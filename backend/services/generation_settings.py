@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from ..config import settings
 
 
 DEFAULT_WORKFLOW = "waiNSFWIllustrious_v140.json"
+DEFAULT_COMFYUI_ROOT = Path("D:/ComfyUI")
 
 
 @dataclass(frozen=True)
@@ -21,6 +23,7 @@ class GenerationSettings:
     next image job without involving the main Agent.
     """
 
+    root_dir: Path
     workflow: str
     negative_prompt: str | None = None
     sampler: str | None = None
@@ -29,6 +32,11 @@ class GenerationSettings:
     cfg: float | None = None
     width: int | None = None
     height: int | None = None
+
+    @property
+    def workflow_dir(self) -> Path:
+        """ComfyUI's standard user workflow directory for this local install."""
+        return self.root_dir / "ComfyUI" / "user" / "default" / "workflows"
 
 
 def load_generation_settings() -> GenerationSettings:
@@ -44,9 +52,11 @@ def load_generation_settings() -> GenerationSettings:
 
     configured = raw.get("comfyui")
     profile = configured if isinstance(configured, dict) else {}
+    root_dir = Path(_optional_text(profile.get("root_dir")) or DEFAULT_COMFYUI_ROOT)
     workflow = _optional_text(profile.get("workflow")) or DEFAULT_WORKFLOW
 
     return GenerationSettings(
+        root_dir=root_dir,
         workflow=workflow,
         negative_prompt=_optional_text(profile.get("negative_prompt")),
         sampler=_optional_text(profile.get("sampler")),

@@ -102,6 +102,11 @@
 
       <div v-if="activeTab === '生图'" class="tab-content">
         <div class="form-field">
+          <label>ComfyUI 根目录</label>
+          <input v-model="settings.comfyui.root_dir" placeholder="D:\\ComfyUI" />
+          <div class="field-hint">工作流将从 &lt;根目录&gt;\\ComfyUI\\user\\default\\workflows 读取。</div>
+        </div>
+        <div class="form-field">
           <label>工作流</label>
           <input v-model="settings.comfyui.workflow" />
         </div>
@@ -259,6 +264,7 @@ const newProviderKey = ref('')
 const settings = reactive({
   context: { max_tokens: 16000, compress_at: 0.85 },
   comfyui: {
+    root_dir: 'D:\\ComfyUI',
     workflow: 'waiNSFWIllustrious_v140.json',
     negative_prompt: null,
     sampler: null,
@@ -529,6 +535,7 @@ const normalizeComfyuiOverrides = () => {
     return Number.isFinite(number) ? number : null
   }
   return {
+    root_dir: optionalText(source.root_dir) || 'D:\\ComfyUI',
     workflow: optionalText(source.workflow) || 'waiNSFWIllustrious_v140.json',
     negative_prompt: optionalText(source.negative_prompt),
     sampler: optionalText(source.sampler),

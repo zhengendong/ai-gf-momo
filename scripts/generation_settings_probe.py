@@ -56,8 +56,12 @@ def main():
             config_file = config_dir / "settings.json"
 
             config_file.write_text(json.dumps({
-                "comfyui": {"workflow": "ANIMA_workflow.json"},
+                "comfyui": {
+                    "root_dir": "D:/ComfyUI",
+                    "workflow": "ANIMA_workflow.json",
+                },
             }), encoding="utf-8")
+            assert load_generation_settings().workflow_dir == Path("D:/ComfyUI/ComfyUI/user/default/workflows")
             inherited = _ksampler_inputs(_build(service, load_generation_settings()))
             inherited_latent = _latent_inputs(_build(service, load_generation_settings()))
             assert inherited["steps"] == 30
@@ -69,6 +73,7 @@ def main():
 
             config_file.write_text(json.dumps({
                 "comfyui": {
+                    "root_dir": "D:/ComfyUI",
                     "workflow": "ANIMA_workflow.json",
                     "steps": 10,
                     "cfg": 1,

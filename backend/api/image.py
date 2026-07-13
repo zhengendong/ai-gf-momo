@@ -89,6 +89,7 @@ async def generate_image(request: ImageGenerationRequest):
             prompt=prompt,
             negative_prompt=profile.negative_prompt,
             workflow_name=profile.workflow,
+            workflow_dir=profile.workflow_dir,
             width=width if width is not None else profile.width,
             height=height if height is not None else profile.height,
             steps=profile.steps,

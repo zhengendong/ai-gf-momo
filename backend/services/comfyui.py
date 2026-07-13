@@ -248,6 +248,7 @@ class ComfyUIService:
         seed: int = -1,
         width: int = None,
         height: int = None,
+        workflow_dir: Path | str | None = None,
         steps: int | None = None,
         cfg: float | None = None,
         sampler: str | None = None,
@@ -277,8 +278,9 @@ class ComfyUIService:
         import json
         from pathlib import Path
 
-        # 工作流目录
-        workflow_dir = Path("D:/ComfyUI/ComfyUI/user/default/workflows")
+        # The local ComfyUI root is selected in the frontend profile. Keep a
+        # legacy fallback so callers outside ImageTool remain compatible.
+        workflow_dir = Path(workflow_dir or "D:/ComfyUI/ComfyUI/user/default/workflows")
         wf_name = workflow_name or "waiNSFWIllustrious_v140.json"
         if Path(wf_name).name != wf_name:
             raise ValueError("工作流名称只能是 workflows 目录中的文件名")

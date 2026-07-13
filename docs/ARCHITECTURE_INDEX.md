@@ -40,7 +40,7 @@ WebSocket / API 输入
   -> 冻结 ImageJob（本轮 reply + image_intent + 状态快照）
   -> 立即发送文本；记忆写入和图片生成走后台任务
   -> 后台记忆实际刷新时推送静默 memory_updated 通知，前端刷新记忆页
-  -> ImageTool：读取 config/settings.json 的全局 comfyui 配置，选定工作流；注入人物预设 + 冻结服饰/场景 + 画面意图。模型、CLIP、VAE、LoRA 与未覆盖的节点参数保留工作流默认值
+  -> ImageTool：读取 config/settings.json 的全局 comfyui 配置；从 <root_dir>/ComfyUI/user/default/workflows 读取选定工作流，注入人物预设 + 冻结服饰/场景 + 画面意图。模型、CLIP、VAE、LoRA 与未覆盖的节点参数保留工作流默认值
   -> ComfyUI 工作流 -> 图片历史和 WebSocket 图片消息
 ```
 
@@ -98,7 +98,7 @@ WebSocket / API 输入
 
 后台任务只读取这个快照。它不会再次读取当前 `status.md`，因此后一轮换装或换场景不会污染已排队图片。
 
-最终 prompt 由 `build_image_prompt()` 统一注入：角色视觉预设、冻结服饰、冻结场景和动态画面标签。工作流选择及参数覆盖由前端全局 `comfyui` 配置控制：`workflow` 决定模型链路；`negative_prompt`、采样器、调度器、步数、CFG 和尺寸留空时继承该工作流，明确填写时才覆盖对应节点。主 Agent 与 ImageJob 不携带工作流或模型选择。
+最终 prompt 由 `build_image_prompt()` 统一注入：角色视觉预设、冻结服饰、冻结场景和动态画面标签。前端全局 `comfyui.root_dir` 是本地 ComfyUI 根目录，后端从 `<root_dir>/ComfyUI/user/default/workflows` 读取 `workflow`；该工作流决定模型链路。`negative_prompt`、采样器、调度器、步数、CFG 和尺寸留空时继承该工作流，明确填写时才覆盖对应节点。主 Agent 与 ImageJob 不携带工作流或模型选择。
 
 ## 全局业务知识与渐进加载
 
