@@ -29,7 +29,7 @@
             </button>
           </div>
 
-          <div v-if="selected" class="viewer" @click.self="selected = null">
+          <div v-if="selected" class="viewer">
             <button class="viewer-close" @click="selected = null" title="返回图库">×</button>
             <img :src="selected.image_url" :alt="`${characterName} 的历史照片`" />
             <p v-if="selected.prompt">{{ selected.prompt }}</p>
