@@ -10,6 +10,7 @@ from typing import Protocol
 import httpx
 
 from ..agents.image import ImagePipeline
+from ..agents.image_director import ImageDirectorAgent
 from ..agents.memory import MemoryAgent
 from ..agents.momo import MomoAgent
 from ..config import settings
@@ -35,7 +36,12 @@ from ..core.orchestrator import bg_tasks
 from ..core.output_monitor import (
     check_output_consistency,
 )
-from ..core.state import apply_state_updates, state_updates_from_effects
+from ..core.state import (
+    apply_state_operations,
+    apply_state_updates,
+    capture_state_snapshot,
+    state_updates_from_effects,
+)
 from ..core.time_system import write_last_chat
 from ..models.schemas import StreamChunk
 from ..services.prompt_builder import sanitize_dynamic_photo_prompt
@@ -75,6 +81,7 @@ class AgentRuntime:
         self.sender = sender
         self.momo_agent = MomoAgent(llm_service)
         self.memory_agent = MemoryAgent(llm_service)
+        self.image_director = ImageDirectorAgent(llm_service)
         self.image_pipeline = ImagePipeline(comfyui_service, sender)
         self.chat_history_buffer: dict[tuple[str, str], list[str]] = {}
         self._character_locks: dict[str, asyncio.Lock] = {}
@@ -155,11 +162,11 @@ class AgentRuntime:
             )
             if output.photo_prompt:
                 output.photo_prompt = _sanitize_photo_prompt_without_blocking(output.photo_prompt)
-            if output.effects and not output.state_updates:
+            if output.effects and not output.state_ops and not output.state_updates:
                 output.state_updates = state_updates_from_effects(char, output.effects)
 
             consistency_started = time.perf_counter()
-            output = await self._ensure_consistent_output(char, output)
+            output = await self._ensure_consistent_output(char, content, output)
             logger.info(
                 "Runtime consistency done: character=%s elapsed=%.3fs",
                 char,
@@ -185,16 +192,23 @@ class AgentRuntime:
                 return
 
             wrote_runtime_state = False
-            if output.state_updates:
+            if output.state_ops:
+                await self._async_apply_state_operations(char, output.state_ops)
+                wrote_runtime_state = True
+            elif output.state_updates:
                 await self._async_update_state(char, output.state_updates)
                 wrote_runtime_state = True
 
-            image_job = build_image_job(
-                char,
-                output.reply,
-                image_intent=output.image_intent,
-                legacy_prompt=output.photo_prompt,
-            )
+            frozen_snapshot = capture_state_snapshot(char)
+            image_job = None
+            if not output.image_goal:
+                image_job = build_image_job(
+                    char,
+                    output.reply,
+                    image_intent=output.image_intent,
+                    legacy_prompt=output.photo_prompt,
+                    state_snapshot=frozen_snapshot,
+                )
 
             if wrote_runtime_state:
                 await self.push_current_state(session_id, char)
@@ -242,7 +256,19 @@ class AgentRuntime:
                     )
                 )
 
-            if image_job:
+            if output.image_goal:
+                bg_tasks.schedule(
+                    self._async_generate_directed_image(
+                        session_id=session_id,
+                        character=char,
+                        user_message=content,
+                        reply=output.reply,
+                        image_goal=output.image_goal,
+                        state_snapshot=frozen_snapshot,
+                        business_knowledge=business_knowledge,
+                    )
+                )
+            elif image_job:
                 bg_tasks.schedule(
                     self.image_pipeline.generate_job(session_id, image_job)
                 )
@@ -337,24 +363,119 @@ class AgentRuntime:
     async def _ensure_consistent_output(
         self,
         character: str,
+        user_message: str,
         output,
     ):
         result = await check_output_consistency(
             character,
             output,
+            user_message,
         )
         if result.valid:
             return output
 
         logger.warning("Output consistency issue for %s: %s", character, result.issues)
-        # A repair model adds latency and may invent a different decision. Keep
-        # the conversational result, but never generate a picture from a turn
-        # whose state relationship is inconsistent.
+        # Repair is exceptional: normal turns still use exactly one synchronous
+        # role-model call.  The reply has not been sent and state has not been
+        # committed yet, so a corrected outcome can still be applied atomically.
+        try:
+            from ..core.state import read_status
+
+            repaired = await self.momo_agent.repair_output(
+                character=character,
+                user_message=user_message,
+                status=read_status(character),
+                output=output,
+                issues=result.issues,
+            )
+            if repaired.photo_prompt:
+                repaired.photo_prompt = _sanitize_photo_prompt_without_blocking(repaired.photo_prompt)
+            if repaired.effects and not repaired.state_ops and not repaired.state_updates:
+                repaired.state_updates = state_updates_from_effects(character, repaired.effects)
+            repaired_result = await check_output_consistency(
+                character,
+                repaired,
+                user_message,
+            )
+            if repaired_result.valid:
+                logger.info("Output consistency repair succeeded for %s", character)
+                return repaired
+            logger.warning(
+                "Output consistency repair remained invalid for %s: %s",
+                character,
+                repaired_result.issues,
+            )
+        except Exception as exc:
+            logger.warning("Output consistency repair failed for %s: %s", character, exc)
+
+        # Never preserve prose that claims an uncommitted action succeeded.
+        output.reply = "（刚才的动作没有成功完成，先保持现在的状态。）"
         output.state_updates = None
         output.effects = []
+        output.state_ops = []
         output.photo_prompt = None
         output.image_intent = None
+        output.image_goal = None
+        output.memory_candidate = None
+        output.immediate_memory = None
         return output
+
+    async def _async_generate_directed_image(
+        self,
+        *,
+        session_id: str,
+        character: str,
+        user_message: str,
+        reply: str,
+        image_goal: dict,
+        state_snapshot: dict,
+        business_knowledge: str,
+    ):
+        """Design and generate one image from the turn's immutable snapshot."""
+        try:
+            await self.sender.send_chunk(
+                session_id,
+                StreamChunk(type="image_status", content="directing"),
+                character=character,
+            )
+            await self.sender.send_chunk(
+                session_id,
+                StreamChunk(type="status_update", content="正在设计画面..."),
+                character=character,
+            )
+            shot_spec = await self.image_director.design(
+                character=character,
+                user_message=user_message,
+                reply=reply,
+                image_goal=image_goal,
+                state_snapshot=state_snapshot,
+                business_knowledge=business_knowledge,
+            )
+            job = build_image_job(
+                character,
+                reply,
+                image_intent=shot_spec,
+                state_snapshot=state_snapshot,
+                image_goal=image_goal,
+            )
+            if not job:
+                raise ValueError("image director produced an empty shot specification")
+            await self.image_pipeline.generate_job(session_id, job)
+        except Exception as exc:
+            logger.error("Directed image generation failed for %s: %s", character, exc)
+            await self.sender.send_chunk(
+                session_id,
+                StreamChunk(type="image_status", content="error"),
+                character=character,
+            )
+            await self.sender.send_chunk(
+                session_id,
+                StreamChunk(type="status_update", content=f"图片任务失败: {exc}"),
+                character=character,
+            )
+
+    async def _async_apply_state_operations(self, character: str, operations: list[dict]):
+        await asyncio.to_thread(apply_state_operations, character, operations)
 
     def _format_user_facing_error(self, char_name: str, error: Exception) -> str:
         if isinstance(error, httpx.HTTPStatusError):

@@ -12,11 +12,11 @@
 
 ## Agent / 状态 / 生图不变量
 
-- 正常对话路径最多一次主生成模型调用；不要为规则选择或一致性修复默认增加第二次 LLM 调用。
+- 正常对话路径最多一次同步主角色模型调用；状态更新由确定性 Reducer 完成。图片轮次可在状态提交后按需调用后台 ImageDirectorAgent，记忆审核继续走后台 MemoryAgent；一致性修复只允许在协议校验失败的异常路径调用一次，不能成为默认路径。
 - `identity.md` 优先于记忆、检索结果和业务知识；业务知识只能补充常识、审美和连续性。
 - 向量召回与长期记忆写入是两条独立链路：召回只提供本轮参考；主 Agent 的 `memory_candidate` 仅是候选，必须由后台 MemoryAgent 二次审核后才能刷新 `long_term.md`。不要混用两者的规则或数据。
-- 主 Agent 输出 `reply`、已完成的 `effects` 和可选 `image_intent`；不要让它拼人物外貌、服饰、场景、质量或负面提示词。
-- `status.md` 是模型可读状态，`state_snapshot.json` 是同步的结构化快照。图片任务必须携带创建当时冻结的状态快照，后台生图禁止重新读取最新状态。
+- 主 Agent 输出 `reply`、已完成的 `state_ops` 和可选高层 `image_goal`；不要让它拼人物外貌、服饰状态投影、场景、镜头标签、质量或负面提示词。旧 `effects/image_intent/photo_prompt/state_updates` 只作为兼容输入保留。
+- `status.md` 是模型可读投影，`state_snapshot.json` 是同步的结构化事实快照。服饰由 `upper/lower/legwear/footwear/accessories` 的分层状态和确定性 Reducer 管理；未知旧标签必须保守保留。图片导演和图片任务必须携带创建当时冻结的状态快照，后台禁止重新读取最新状态。
 - 状态变化必须先提交，再创建 ImageJob。图片、回复和状态不一致时，宁可不生图，也不要生成错误图片。
 - 生图工作流、模型和可选覆盖参数由后端读取 `config/settings.json` 的全局 `comfyui` 配置；`root_dir` 是本地 ComfyUI 根目录，工作流从 `<root_dir>/ComfyUI/user/default/workflows` 读取。主 Agent 只输出画面意图，不选择工作流或模型。前端空值表示继承所选工作流节点的默认值，只有明确填写的值才可覆盖。复杂工作流的受控节点由 `config/workflow_adapters/<workflow-stem>.json` 声明；有映射时只能修改映射节点，不能再按类型批量覆盖。
 - ComfyUI 生图使用同一 `client_id` 的 `/ws` 完成事件等待，不得恢复为固定间隔轮询 `/history`。完成事件后只读取一次 `/history/{prompt_id}` 获取输出元数据，再通过 `/view` 下载最终图片；二进制预览帧不改变当前前端展示。
@@ -28,6 +28,8 @@
 - 改动架构、模块职责、数据流、关键契约、配置入口或验证方式时，必须同步更新 `docs/ARCHITECTURE_INDEX.md`。
 - 每次实现后至少运行相关的离线验证；涉及对话/状态/生图链路时运行：
   - `py scripts/architecture_smoke.py`
+  - `py scripts/wardrobe_layer_probe.py`
+  - `py scripts/turn_transaction_probe.py`
   - `py scripts/memory_candidate_probe.py`
   - `py scripts/runtime_conversation_probe.py`
   - `py scripts/workflow_adapter_probe.py`

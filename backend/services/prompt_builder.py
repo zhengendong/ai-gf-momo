@@ -9,6 +9,7 @@ import logging
 from ..core.state import read_status, read_state_snapshot
 from ..core.characters import get_active
 from ..core.context import load_character_profile
+from ..core.wardrobe import wardrobe_visible_tags
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +116,18 @@ CONFLICT_GROUPS = {
         "back_view",
         "side_view",
     },
+    "leg_position": {
+        "legs_together",
+        "knees_together",
+        "legs_spread",
+        "spread_legs",
+        "spreading_legs",
+    },
+    "target_visibility": {
+        "covering_self",
+        "hands_covering_crotch",
+        "covering_crotch",
+    },
 }
 
 CLOSEUP_CONFLICT_TAGS = {
@@ -144,12 +157,13 @@ CAMERA_ACTION_RULES = [
         "name": "pussy_focus",
         "triggers": {"pussy_focus", "spread_pussy"},
         "add": [
-            "lying_down",
             "legs_spread",
             "presenting_pussy",
             "pussy_focus",
         ],
-        "remove_groups": {"body_pose"},
+        # Focus must not rewrite a valid sitting/standing/lying decision.  It
+        # only removes limb/visibility states that make the target impossible.
+        "remove_groups": {"leg_position", "target_visibility"},
     },
     {
         "name": "feet_focus",
@@ -334,6 +348,7 @@ def normalize_camera_action_tags(prompt: str) -> str:
     """
     tags = _dedupe_tags(_split_prompt_tags(prompt))
     tags = _drop_redundant_composition_tags(tags)
+    tags = _drop_generic_pose_conflicts(tags)
     normalized = {_norm_tag(t) for t in tags}
 
     for rule in CAMERA_ACTION_RULES:
@@ -354,6 +369,17 @@ def normalize_camera_action_tags(prompt: str) -> str:
         logger.info(f"已应用视角/动作规则: {rule['name']}")
 
     return ", ".join(tags)
+
+
+def _drop_generic_pose_conflicts(tags: list[str]) -> list[str]:
+    """Resolve hard limb contradictions even when no special focus is set."""
+    normalized = {_norm_tag(tag) for tag in tags}
+    spread = {"legs_spread", "spread_legs", "spreading_legs"}
+    together = {"legs_together", "knees_together"}
+    if normalized & spread and normalized & together:
+        tags = [tag for tag in tags if _norm_tag(tag) not in together]
+        logger.info("已移除与张腿动作冲突的并腿标签")
+    return tags
 
 
 def _drop_redundant_composition_tags(tags: list[str]) -> list[str]:
@@ -527,7 +553,11 @@ def build_image_prompt(
         clothing_tags = get_clothing_tags(character)
     else:
         scene_tags = ", ".join(state_snapshot.get("scene_tags") or [])
-        clothing_tags = ", ".join(state_snapshot.get("outfit_tags") or [])
+        wardrobe = state_snapshot.get("wardrobe")
+        if isinstance(wardrobe, dict):
+            clothing_tags = ", ".join(wardrobe_visible_tags(wardrobe))
+        else:
+            clothing_tags = ", ".join(state_snapshot.get("outfit_tags") or [])
     parts = [p for p in [char_tags, prompt, scene_tags, clothing_tags] if p]
     final_prompt = normalize_prompt(
         normalize_camera_action_tags(

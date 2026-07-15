@@ -134,6 +134,33 @@ class MomoAgent:
 
         return output
 
+    async def repair_output(
+        self,
+        *,
+        character: str,
+        user_message: str,
+        status: str,
+        output: AgentOutput,
+        issues: list[str],
+    ) -> AgentOutput:
+        """Repair one invalid turn outcome on the exceptional path only."""
+        payload = {
+            "current_user_message": user_message,
+            "current_status": status,
+            "invalid_output": output.model_dump(),
+            "validation_issues": issues,
+            "instruction": (
+                "Return one corrected complete JSON outcome. Preserve the character's decision and voice, "
+                "but make reply, completed state_ops and image_goal mutually consistent. Do not explain."
+            ),
+        }
+        raw = await self.llm.chat_prompt(
+            system=self.system_prompt(character),
+            user=json.dumps(payload, ensure_ascii=False, indent=2),
+            temperature=0.3,
+        )
+        return self._parse_output(raw)
+
     def _parse_output(self, raw: str) -> AgentOutput:
         """解析 LLM 输出的 JSON"""
         import re
@@ -148,6 +175,8 @@ class MomoAgent:
             data = json.loads(text)
             return AgentOutput(
                 reply=data.get("reply", ""),
+                state_ops=data.get("state_ops") or [],
+                image_goal=data.get("image_goal"),
                 effects=data.get("effects") or [],
                 image_intent=data.get("image_intent"),
                 memory_candidate=data.get("memory_candidate"),
@@ -156,6 +185,6 @@ class MomoAgent:
                 immediate_memory=data.get("immediate_memory"),
                 persist_context=data.get("persist_context", True),
             )
-        except (json.JSONDecodeError, KeyError) as e:
+        except (json.JSONDecodeError, KeyError, ValueError) as e:
             logger.warning(f"解析 Agent 输出失败: {e}, raw={raw[:200]}")
             return AgentOutput(reply=raw.strip())

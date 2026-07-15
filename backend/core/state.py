@@ -6,12 +6,20 @@
 import logging
 import json
 import re
+from copy import deepcopy
 from pathlib import Path
 from typing import Optional
 
 from ..config import settings
 from ..utils.helpers import read_markdown, write_markdown
 from .outfit_state import normalize_outfit_markdown
+from .wardrobe import (
+    normalize_wardrobe,
+    reduce_wardrobe,
+    wardrobe_all_tags,
+    wardrobe_from_tags,
+    wardrobe_visible_tags,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -90,9 +98,17 @@ def capture_state_snapshot(character: str) -> dict:
     """Return a self-contained visual state snapshot for an asynchronous job."""
     status = read_status(character)
     previous = read_state_snapshot(character)
+    wardrobe = previous.get("wardrobe")
+    if isinstance(wardrobe, dict):
+        wardrobe = normalize_wardrobe(wardrobe)
+    else:
+        wardrobe = wardrobe_from_tags(_read_section_tags(status, "穿着"))
     return {
         "version": int(previous.get("version") or 0),
-        "outfit_tags": _read_section_tags(status, "穿着"),
+        "wardrobe": deepcopy(wardrobe),
+        # Compatibility projection for old image and API consumers.  It is a
+        # render projection, not the canonical layered wardrobe.
+        "outfit_tags": wardrobe_visible_tags(wardrobe),
         "scene_tags": _read_section_tags(status, "场景细节"),
     }
 
@@ -154,6 +170,7 @@ def apply_state_updates(character: str, updates: dict):
 
     if "status" in updates:
         status_val = updates["status"]
+        wardrobe_changed = isinstance(status_val, str)
         if isinstance(status_val, str):
             write_status(character, status_val)
         elif isinstance(status_val, dict):
@@ -161,15 +178,84 @@ def apply_state_updates(character: str, updates: dict):
             current = read_status(character)
             merged = _deep_merge_markdown(character, current, status_val)
             write_status(character, merged)
-        _write_state_snapshot(character)
+            aliases = _section_aliases(character)
+            wardrobe_changed = any(
+                aliases.get(section, section) == "穿着" for section in status_val
+            )
+        _write_state_snapshot(character, rebuild_wardrobe=wardrobe_changed)
 
 
-def _write_state_snapshot(character: str):
+def apply_state_operations(character: str, operations: list[dict]) -> dict:
+    """Validate and atomically project completed V2 state operations.
+
+    Wardrobe operations are reduced against the canonical layered snapshot.
+    Scene and mood operations reuse the existing Markdown compatibility
+    projection.  No file is changed until every operation validates.
+    """
+    operations = operations or []
+    current_status = read_status(character)
+    previous = read_state_snapshot(character)
+    raw_wardrobe = previous.get("wardrobe")
+    wardrobe = (
+        normalize_wardrobe(raw_wardrobe)
+        if isinstance(raw_wardrobe, dict)
+        else wardrobe_from_tags(_read_section_tags(current_status, "穿着"))
+    )
+    wardrobe_ops = [
+        operation for operation in operations
+        if isinstance(operation, dict)
+        and str(operation.get("domain") or "").strip().lower() == "wardrobe"
+    ]
+    next_wardrobe = reduce_wardrobe(wardrobe, wardrobe_ops)
+
+    status_updates: dict[str, str] = {}
+    if wardrobe_ops:
+        status_updates["穿着"] = _tags_to_markdown(wardrobe_all_tags(next_wardrobe))
+
+    for operation in operations:
+        if not isinstance(operation, dict):
+            raise ValueError("state operation must be an object")
+        domain = str(operation.get("domain") or "").strip().lower()
+        action = str(operation.get("operation") or operation.get("type") or "").strip().lower()
+        action = action.removeprefix(f"{domain}.") if domain else action
+        if domain == "wardrobe":
+            continue
+        if domain == "scene" and action in {"replace", "update", "change"}:
+            tags = operation.get("tags") or operation.get("scene_tags")
+            if not tags:
+                raise ValueError("scene operation requires complete tags")
+            status_updates["场景细节"] = _tags_to_markdown(tags)
+        elif domain == "mood" and action in {"set", "update", "change"}:
+            value = operation.get("value") or operation.get("tags")
+            if not value:
+                raise ValueError("mood operation requires a value")
+            status_updates[_mood_section(character)] = _tags_to_markdown(value)
+        else:
+            raise ValueError(f"unsupported state operation: {domain}.{action}")
+
+    if status_updates:
+        merged = _deep_merge_markdown(character, current_status, status_updates)
+        write_status(character, merged)
+        _write_state_snapshot(character, wardrobe=next_wardrobe)
+    return capture_state_snapshot(character)
+
+
+def _write_state_snapshot(
+    character: str,
+    wardrobe: dict | None = None,
+    rebuild_wardrobe: bool = False,
+):
     """Persist the machine-readable source alongside the Markdown projection."""
     path = get_state_snapshot_path(character)
     path.parent.mkdir(parents=True, exist_ok=True)
     previous = read_state_snapshot(character)
     snapshot = capture_state_snapshot(character)
+    if rebuild_wardrobe and wardrobe is None:
+        wardrobe = wardrobe_from_tags(_read_section_tags(read_status(character), "穿着"))
+    if wardrobe is not None:
+        normalized = normalize_wardrobe(wardrobe)
+        snapshot["wardrobe"] = normalized
+        snapshot["outfit_tags"] = wardrobe_visible_tags(normalized)
     snapshot["version"] = int(previous.get("version") or 0) + 1
     path.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
 

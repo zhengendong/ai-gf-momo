@@ -9,6 +9,8 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException
+from starlette.responses import Response
 
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -21,6 +23,25 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
+
+
+class SPAStaticFiles(StaticFiles):
+    """Serve the built Vue application and fall back to its entry page.
+
+    API, WebSocket, and generated-image routes are registered before this
+    catch-all mount.  The fallback only applies to browser navigation, so a
+    missing JavaScript/CSS/image asset still returns a normal 404 instead of
+    accidentally receiving ``index.html``.
+    """
+
+    async def get_response(self, path: str, scope) -> Response:
+        accepts_html = b"text/html" in dict(scope["headers"]).get(b"accept", b"")
+        try:
+            return await super().get_response(path, scope)
+        except HTTPException as error:
+            if error.status_code != 404 or not accepts_html:
+                raise
+            return await super().get_response("index.html", scope)
 
 
 @asynccontextmanager
@@ -87,10 +108,11 @@ app.include_router(ws.router, tags=["WebSocket"])
 settings.static_dir.mkdir(parents=True, exist_ok=True)
 app.mount("/static", StaticFiles(directory=str(settings.static_dir)), name="static")
 
-# 静态文件服务（前端 build）
+# Static frontend for the single-service production mode.  Vite remains a
+# separate development server; it proxies these same API/WebSocket routes.
 frontend_dir = Path(__file__).parent.parent / "frontend" / "dist"
 if frontend_dir.exists():
-    app.mount("/", StaticFiles(directory=str(frontend_dir), html=True), name="frontend")
+    app.mount("/", SPAStaticFiles(directory=str(frontend_dir), html=True), name="frontend")
 
 
 if __name__ == "__main__":

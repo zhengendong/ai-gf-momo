@@ -23,6 +23,14 @@ class StreamChunk(BaseModel):
 class AgentOutput(BaseModel):
     """Character agent output."""
     reply: str = Field(..., description="角色的对话回复")
+    state_ops: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="本轮已经完成的V2结构化状态操作，由后端Reducer提交",
+    )
+    image_goal: Optional[dict[str, Any]] = Field(
+        None,
+        description="高层图片交付目标；不包含镜头标签、服饰、场景或模型配置",
+    )
     effects: list[dict[str, Any]] = Field(
         default_factory=list,
         description="本轮已经发生的结构化现实状态事件",

@@ -64,7 +64,7 @@ class FakeComfy:
     async def wait_for_completion(self, prompt_id, *args, **kwargs):
         return {"outputs": {"1": {"images": [{"filename": "probe.png", "subfolder": ""}]}}}
 
-    async def get_image(self, filename, subfolder=""):
+    async def get_image(self, filename, subfolder="", folder_type="output"):
         # Minimal PNG header payload is enough for file IO tests here.
         return b"\x89PNG\r\n\x1a\n"
 

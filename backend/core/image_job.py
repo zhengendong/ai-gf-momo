@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from copy import deepcopy
 from typing import Any
 from uuid import uuid4
 
@@ -16,6 +17,8 @@ class ImageJob:
     reply: str
     dynamic_prompt: str
     state_snapshot: dict[str, Any]
+    image_goal: dict[str, Any] | None = None
+    shot_spec: dict[str, Any] | None = None
 
 
 def build_image_job(
@@ -23,6 +26,8 @@ def build_image_job(
     reply: str,
     image_intent: dict[str, Any] | None = None,
     legacy_prompt: str | None = None,
+    state_snapshot: dict[str, Any] | None = None,
+    image_goal: dict[str, Any] | None = None,
 ) -> ImageJob | None:
     """Freeze state and compile the main Agent's shot brief into one job."""
     if not image_intent and not legacy_prompt:
@@ -38,7 +43,9 @@ def build_image_job(
         character=character,
         reply=reply,
         dynamic_prompt=dynamic_prompt,
-        state_snapshot=capture_state_snapshot(character),
+        state_snapshot=deepcopy(state_snapshot) if state_snapshot is not None else capture_state_snapshot(character),
+        image_goal=deepcopy(image_goal) if image_goal is not None else None,
+        shot_spec=deepcopy(image_intent) if image_intent is not None else None,
     )
 
 

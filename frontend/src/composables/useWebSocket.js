@@ -65,18 +65,22 @@ export function useWebSocket() {
           imageStatus.value = 'done'
 
         } else if (data.type === 'image_status') {
-          if (data.content === 'generating') {
+          if (data.content === 'directing' || data.content === 'generating') {
             imageStatus.value = 'generating'
+            const progressText = data.content === 'directing' ? '正在设计画面...' : '正在生成图片...'
             if (!pendingImageId) {
               pendingImageId = `image_pending_${Date.now()}`
               messages.value.push({
                 id: pendingImageId,
                 role: 'assistant',
                 type: 'image_pending',
-                content: '正在生成图片...',
+                content: progressText,
                 timestamp: new Date(),
                 completed: false
               })
+            } else {
+              const pending = messages.value.find(m => m.id === pendingImageId)
+              if (pending) pending.content = progressText
             }
           } else if (data.content === 'error') {
             imageStatus.value = 'error'

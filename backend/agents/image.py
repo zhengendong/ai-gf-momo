@@ -93,7 +93,19 @@ class ImagePipeline:
                     })
                 except Exception as e:
                     logger.warning("Failed to write image chat history for %s: %s", character, e)
-                self.tool.add_history(character, prompt_used, url, image_path)
+                self.tool.add_history(
+                    character,
+                    prompt_used,
+                    url,
+                    image_path,
+                    metadata={
+                        "job_id": job.job_id,
+                        "state_version": job.state_snapshot.get("version"),
+                        "image_goal": job.image_goal,
+                        "shot_spec": job.shot_spec,
+                        "dynamic_prompt": job.dynamic_prompt,
+                    },
+                )
                 await self._push(
                     session_id,
                     StreamChunk(type="status_update", content="照片已生成 ✓"),

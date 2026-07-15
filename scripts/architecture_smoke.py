@@ -12,14 +12,25 @@ if str(ROOT) not in sys.path:
 from backend.config import settings
 from backend.core.business_knowledge import route_domains
 from backend.core.image_job import build_image_job
-from backend.core.state import apply_state_updates, state_updates_from_effects
-from backend.services.prompt_builder import build_image_prompt
+from backend.core.state import (
+    apply_state_operations,
+    apply_state_updates,
+    state_updates_from_effects,
+)
+from backend.services.prompt_builder import build_image_prompt, normalize_camera_action_tags
 
 
 def main():
     assert route_domains("换套舒服的睡衣给我看看") == ["wardrobe", "photography"]
+    assert route_domains("看一下") == ["photography"]
     assert route_domains("你还记得上次吗") == ["recall"]
     assert route_domains("今天吃了什么") == []
+    focused = normalize_camera_action_tags(
+        "sitting_on_bed, legs_together, spreading_legs, covering_self, pussy_focus"
+    )
+    assert "legs_together" not in focused
+    assert "covering_self" not in focused
+    assert "sitting_on_bed" in focused and "lying_down" not in focused
 
     original_base = settings.base_dir
     with tempfile.TemporaryDirectory() as temp:
@@ -74,6 +85,32 @@ def main():
                 state_snapshot=job.state_snapshot,
             )
             assert "pink_pajamas" in prompt and "black_dress" not in prompt
+
+            # V2 state operations preserve untouched layers and make the next
+            # inner layer visible after removing the outer layer.
+            apply_state_operations(char, [{
+                "domain": "wardrobe",
+                "operation": "replace",
+                "garments": [
+                    {"id": "inner", "slots": ["lower"], "tags": ["white_panties"]},
+                    {"id": "outer", "slots": ["lower"], "tags": ["blue_skirt"]},
+                    {"id": "top", "slots": ["upper"], "tags": ["white_blouse"]},
+                ],
+            }])
+            apply_state_operations(char, [{
+                "domain": "wardrobe",
+                "operation": "remove",
+                "slot": "lower",
+                "target": "outermost",
+            }])
+            v2_job = build_image_job(char, "完成。", image_intent={
+                "generate": True,
+                "camera": {"shot": "medium_shot", "angle": "front_view"},
+                "rating": "sensitive",
+            })
+            assert v2_job
+            assert "white_panties" in v2_job.state_snapshot["outfit_tags"]
+            assert "blue_skirt" not in v2_job.state_snapshot["outfit_tags"]
             print("architecture smoke: ok")
         finally:
             settings.base_dir = original_base

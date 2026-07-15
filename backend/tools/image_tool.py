@@ -10,6 +10,7 @@ from typing import Optional
 from ..config import settings
 from ..services.prompt_builder import build_image_prompt
 from ..services.generation_settings import load_generation_settings
+from ..services.comfyui import select_history_image
 from ..core.image_job import ImageJob
 
 logger = logging.getLogger(__name__)
@@ -125,18 +126,14 @@ class ImageTool:
         }
 
     async def save_from_history(self, history: dict, character: str) -> Optional[str]:
-        """从 ComfyUI history 中提取第一张图片并保存到角色图片目录。"""
-        outputs = history.get("outputs", {})
-        for node_output in outputs.values():
-            images = node_output.get("images", [])
-            if not images:
-                continue
-
-            image_info = images[0]
+        """下载 ComfyUI 最终输出，兼容仅含 PreviewImage 的工作流。"""
+        image_info = select_history_image(history)
+        if image_info:
             filename = image_info["filename"]
-            subfolder = image_info.get("subfolder", "")
+            subfolder = image_info["subfolder"]
+            folder_type = image_info["type"]
 
-            image_data = await self.comfyui.get_image(filename, subfolder)
+            image_data = await self.comfyui.get_image(filename, subfolder, folder_type)
             save_dir = settings.get_images_dir(character)
             save_dir.mkdir(parents=True, exist_ok=True)
             save_path = save_dir / filename
@@ -153,8 +150,15 @@ class ImageTool:
         prompt: str,
         image_url: str,
         image_path: str,
+        metadata: dict | None = None,
     ):
         """记录到角色图片历史。"""
         from ..api.image import _add_history
 
-        _add_history(prompt, image_url, image_path, character=character)
+        _add_history(
+            prompt,
+            image_url,
+            image_path,
+            character=character,
+            metadata=metadata,
+        )

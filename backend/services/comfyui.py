@@ -22,6 +22,28 @@ from .workflow_adapter import WorkflowAdapter, load_workflow_adapter
 logger = logging.getLogger(__name__)
 
 
+def select_history_image(history: dict) -> Optional[dict]:
+    """Select a downloadable image while preserving ComfyUI folder metadata.
+
+    ``SaveImage`` entries use ``type=output`` while ``PreviewImage`` entries
+    use ``type=temp``. Prefer a persisted output when both exist, but keep
+    preview-only workflows usable by returning their temporary image.
+    """
+    candidates: list[dict] = []
+    for node_output in (history.get("outputs") or {}).values():
+        for image_info in node_output.get("images") or []:
+            if not image_info.get("filename"):
+                continue
+            candidate = dict(image_info)
+            candidate["subfolder"] = candidate.get("subfolder") or ""
+            candidate["type"] = candidate.get("type") or "output"
+            candidates.append(candidate)
+
+    if not candidates:
+        return None
+    return min(candidates, key=lambda item: 0 if item["type"] == "output" else 1)
+
+
 
 class ComfyUIService:
     """ComfyUI 服务"""
@@ -273,33 +295,28 @@ class ComfyUIService:
             logger.error(f"获取 ComfyUI 任务结果失败: {prompt_id}")
             return None
 
-        # 3. 提取图片信息
-        outputs = history.get("outputs", {})
-        for node_id, node_output in outputs.items():
-            images = node_output.get("images", [])
-            if images:
-                image_info = images[0]
-                filename = image_info["filename"]
-                subfolder = image_info.get("subfolder", "")
+        # 3. 提取图片信息。history 的 type 决定 /view 应读取 output 还是 temp。
+        image_info = select_history_image(history)
+        if image_info:
+            filename = image_info["filename"]
+            subfolder = image_info["subfolder"]
+            folder_type = image_info["type"]
 
-                # 获取图片数据
-                image_data = await self.get_image(filename, subfolder)
+            image_data = await self.get_image(filename, subfolder, folder_type)
 
-                # 保存图片
-                if save_to:
-                    save_to.parent.mkdir(parents=True, exist_ok=True)
-                    with open(save_to, "wb") as f:
-                        f.write(image_data)
-                    logger.info(f"图片已保存: {save_to}")
-                    return str(save_to)
-                else:
-                    # 保存到默认位置
-                    save_dir = settings.get_images_dir(get_active())
-                    save_dir.mkdir(parents=True, exist_ok=True)
-                    default_path = save_dir / filename
-                    default_path.write_bytes(image_data)
-                    logger.info(f"图片已保存: {default_path}")
-                    return str(default_path)
+            if save_to:
+                save_to.parent.mkdir(parents=True, exist_ok=True)
+                with open(save_to, "wb") as f:
+                    f.write(image_data)
+                logger.info(f"图片已保存: {save_to}")
+                return str(save_to)
+
+            save_dir = settings.get_images_dir(get_active())
+            save_dir.mkdir(parents=True, exist_ok=True)
+            default_path = save_dir / filename
+            default_path.write_bytes(image_data)
+            logger.info(f"图片已保存: {default_path}")
+            return str(default_path)
 
         logger.error(f"未找到生成的图片: {prompt_id}")
         return None
