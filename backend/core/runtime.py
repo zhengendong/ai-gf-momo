@@ -37,7 +37,6 @@ from ..core.state import (
     capture_state_snapshot,
     commit_continuity_patch,
 )
-from ..core.time_system import write_last_chat
 from ..models.schemas import StreamChunk
 
 logger = logging.getLogger(__name__)
@@ -391,11 +390,6 @@ class AgentRuntime:
                     StreamChunk(type="image_status", content="done"),
                     character=char,
                 )
-
-            try:
-                write_last_chat(char)
-            except Exception as e:
-                logger.debug("write_last_chat failed: %s", e)
 
             if interaction_mode != "scene_transition":
                 history.append(f"{user_label}：{content}")

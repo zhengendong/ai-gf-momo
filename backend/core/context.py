@@ -9,7 +9,6 @@ from typing import Optional
 
 from ..config import settings
 from ..utils.helpers import read_markdown
-from ..core.time_system import format_time_prompt_section
 
 
 def load_character_profile(character: str) -> dict:
@@ -118,9 +117,6 @@ def assemble_momo_prompt(
 
     parts = [
         "# 当前上下文包",
-        "",
-        "# ---- 当前时间 ----",
-        format_time_prompt_section(character),
         "",
         "## 1. user.json（用户信息）",
         user_profile or "（未填写）",

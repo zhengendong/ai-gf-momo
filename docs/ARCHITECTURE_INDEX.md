@@ -48,6 +48,8 @@ flowchart TD
 
 `AgentRuntime` 对同一角色加 `asyncio.Lock`，因此两轮状态解析和提交不会交错。VisualContinuity 输出先做无写入合并校验，再提交；连续性 JSON 或补丁无效时允许同一个 Agent 修复一次。两次均失败时，本轮不提交状态、不发送角色台词、不创建 ImageJob，只通过系统状态消息提示重试，避免角色说出“做到了”而实际状态未变。
 
+故事运行在独立的虚拟时空中。真实系统时间不再注入主 Agent 或 VisualContinuityAgent，也不参与剧情推进、场景判断、状态变化或“距上次聊天”的推断；聊天消息自身的技术时间戳仍由历史记录保留，用于前端显示和日志追踪。
+
 关键入口：`backend/core/runtime.py`、`backend/agents/momo.py`、`backend/agents/image_director.py`、`backend/core/state.py`、`backend/core/wardrobe.py`、`backend/core/image_job.py`。
 
 ## MomoAgent 契约

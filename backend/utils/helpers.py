@@ -3,9 +3,8 @@
 """
 
 import uuid
-from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import yaml
 
@@ -15,16 +14,6 @@ from ..config import settings
 def generate_uuid() -> str:
     """生成 UUID"""
     return str(uuid.uuid4())
-
-
-def get_current_time() -> datetime:
-    """获取当前时间"""
-    return datetime.utcnow()
-
-
-def format_timestamp(dt: datetime) -> str:
-    """格式化时间戳"""
-    return dt.isoformat()
 
 
 def load_yaml(file_path: Path) -> dict[str, Any]:
