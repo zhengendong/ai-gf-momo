@@ -30,7 +30,6 @@ const props = defineProps({
 const DISPLAY_SECTIONS = [
   { key: 'outfit', label: '穿着' },
   { key: 'scene', label: '场景细节' },
-  { key: 'mood', label: '心情状态' },
 ]
 
 const visibleSections = computed(() => {
@@ -41,7 +40,6 @@ const visibleSections = computed(() => {
   const normalized = {
     outfit: all['穿着'],
     scene: all['场景细节'],
-    mood: findMood(all),
   }
 
   return DISPLAY_SECTIONS
@@ -53,15 +51,6 @@ const visibleSections = computed(() => {
 })
 
 const hasSections = computed(() => visibleSections.value.length > 0)
-
-const findMood = (sections) => {
-  for (const [key, value] of Object.entries(sections)) {
-    if ((key === '心情状态' || key.endsWith('的心情状态')) && value?.trim()) {
-      return value
-    }
-  }
-  return ''
-}
 
 const cleanupItems = (text) => {
   return String(text || '')

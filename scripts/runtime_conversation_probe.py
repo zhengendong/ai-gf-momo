@@ -192,6 +192,69 @@ async def run_case(name: str, messages: list[str], llm_outputs: list[dict | str]
     return result
 
 
+async def run_scene_transition_case():
+    sender = CapturingSender()
+    llm = FakeLLM([
+        {
+            "reply": "几天后的午后，她穿着校服站在教学楼走廊，朝你挥了挥手。",
+            "image_goal": None,
+            "memory_candidate": None,
+            "persist_context": True,
+        },
+        {
+            "reason": "下一幕已明确建立学校走廊和校服。",
+            "state_patch": {
+                "wardrobe": {
+                    "upper": {"mode": "replace", "layers": [{
+                        "id": "school_blazer_1", "slots": ["upper"],
+                        "category": "outerwear", "tags": ["navy_school_blazer"],
+                    }]},
+                    "lower": {"mode": "replace", "layers": [{
+                        "id": "school_skirt_1", "slots": ["lower"],
+                        "category": "outerwear", "tags": ["plaid_school_skirt"],
+                    }]},
+                    "legwear": {"mode": "replace", "layers": [{
+                        "id": "knee_socks_1", "slots": ["legwear"],
+                        "category": "legwear", "tags": ["black_knee_socks"],
+                    }]},
+                    "footwear": {"mode": "replace", "layers": [{
+                        "id": "loafers_1", "slots": ["footwear"],
+                        "category": "footwear", "tags": ["brown_loafers"],
+                    }]},
+                },
+                "scene": {"mode": "replace", "tags": ["school_hallway", "afternoon"]},
+            },
+            "shot_spec": None,
+        },
+    ])
+    runtime = AgentRuntime(llm, FakeComfy(), sender)
+    await runtime.handle_scene_transition(
+        "scene_session", CHARACTER, mode="manual", concept="几天后在学校重逢"
+    )
+    if bg_tasks.active_count:
+        await asyncio.gather(*list(bg_tasks._tasks), return_exceptions=True)
+
+    history = read_chat_history(CHARACTER)
+    chunk_types = [chunk.type for chunk in sender.chunks]
+    visual_payload = json.loads(llm.calls[1]["user"])
+    assert visual_payload["interaction_mode"] == "scene_transition"
+    assert "界面触发的剧情推进任务" in llm.calls[0]["user"]
+    assert [item["type"] for item in history[-2:]] == ["scene_divider", "text"]
+    assert all("用户对下一幕的构想" not in item.get("content", "") for item in history)
+    assert chunk_types.index("state_update") < chunk_types.index("scene_divider") < chunk_types.index("text")
+    assert "school_hallway" in read_status(CHARACTER)
+    return {
+        "case": "scene_transition",
+        "llm_calls": len(llm.calls),
+        "checks": {
+            "chunk_type_order": chunk_types,
+            "history_tail_types": [item["type"] for item in history[-2:]],
+            "hidden_instruction_not_persisted": True,
+            "interaction_mode_forwarded": True,
+        },
+    }
+
+
 async def main():
     with tempfile.TemporaryDirectory(prefix="ai_gf_probe_") as tmp:
         root = Path(tmp)
@@ -277,6 +340,9 @@ async def main():
         assert large_history["checks"]["visual_history_messages"] == [16]
         assert large_history["checks"]["main_prompt_marks_status_objective"]
         results.append(large_history)
+
+        setup_temp_app(root)
+        results.append(await run_scene_transition_case())
 
         print(json.dumps(results, ensure_ascii=False, indent=2))
 

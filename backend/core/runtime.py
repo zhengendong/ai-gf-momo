@@ -12,7 +12,7 @@ from ..agents.image_director import VisualContinuityAgent, VisualContinuityError
 from ..agents.memory import MemoryAgent
 from ..agents.momo import MomoAgent
 from ..config import settings
-from ..core.chat_history import append_chat_pair, read_chat_history
+from ..core.chat_history import append_chat_pair, append_scene_transition, read_chat_history
 from ..core.context import (
     append_daily_memory,
     assemble_momo_prompt,
@@ -46,6 +46,14 @@ MAX_HISTORY_TURNS = 20
 VISUAL_HISTORY_MESSAGES = 16  # Eight prior user/assistant rounds.
 VISUAL_HISTORY_MESSAGE_CHARS = 800
 
+SCENE_TRANSITION_BASE = (
+    "根据当前剧情、人物关系和已经发生的事件，自然推进到合理的下一幕。"
+    "选择合适的时间、地点和情境，并根据新场景决定角色是否需要换装；"
+    "需要换装时自然明确本幕实际穿着，合理时也可以保持原穿着。"
+    "直接输出已经发生的下一幕，可以是纯情景叙述，也可以包含角色动作和台词，"
+    "不要解释设计过程。"
+)
+
 
 def _has_memory_update(value) -> bool:
     return bool(value.strip()) if isinstance(value, str) else bool(value)
@@ -57,6 +65,20 @@ def _clip_visual_history_content(value: str) -> str:
         return text
     half = (VISUAL_HISTORY_MESSAGE_CHARS - 1) // 2
     return f"{text[:half]}…{text[-half:]}"
+
+
+def build_scene_transition_instruction(mode: str, concept: str = "") -> str:
+    normalized_mode = str(mode or "auto").strip().lower()
+    idea = str(concept or "").strip()
+    if normalized_mode not in {"auto", "manual"}:
+        raise ValueError("场景切换模式无效，请重试。")
+    if normalized_mode == "manual" and not idea:
+        raise ValueError("请先填写下一幕构想。")
+    if len(idea) > 2000:
+        raise ValueError("下一幕构想不能超过 2000 个字符。")
+    if normalized_mode == "manual":
+        return f"{SCENE_TRANSITION_BASE}\n\n用户对下一幕的构想：{idea}"
+    return SCENE_TRANSITION_BASE
 
 
 def _recent_visual_dialogue(
@@ -136,7 +158,38 @@ class AgentRuntime:
         async with lock:
             await self._handle_message(session_id, character, content)
 
-    async def _handle_message(self, session_id: str, character: str, content: str):
+    async def handle_scene_transition(
+        self,
+        session_id: str,
+        character: str,
+        mode: str = "auto",
+        concept: str = "",
+    ):
+        """Advance the story through the normal Momo -> continuity transaction."""
+        instruction = build_scene_transition_instruction(mode, concept)
+        lock = self._character_locks.setdefault(character, asyncio.Lock())
+        async with lock:
+            await self._handle_message(
+                session_id,
+                character,
+                instruction,
+                interaction_mode="scene_transition",
+                interaction_summary=(
+                    f"下一幕构想：{str(concept).strip()}"
+                    if str(mode).strip().lower() == "manual"
+                    else "自动推进下一幕"
+                ),
+            )
+
+    async def _handle_message(
+        self,
+        session_id: str,
+        character: str,
+        content: str,
+        *,
+        interaction_mode: str = "chat",
+        interaction_summary: str = "",
+    ):
         started_at = time.perf_counter()
         char = character
         char_name = get_character_name(char)
@@ -160,6 +213,7 @@ class AgentRuntime:
                 char,
                 content,
                 business_knowledge=business_knowledge,
+                interaction_mode=interaction_mode,
             )
             context_started = time.perf_counter()
             summary, chat_history = await build_context_window(
@@ -189,6 +243,7 @@ class AgentRuntime:
                 conversation_summary=summary,
                 recalled_memories=recalled_memories,
                 business_knowledge=business_knowledge,
+                interaction_mode=interaction_mode,
             )
             logger.info(
                 "Runtime main LLM done: character=%s elapsed=%.3fs",
@@ -231,6 +286,7 @@ class AgentRuntime:
                     previous_state=previous_snapshot,
                     recent_dialogue=recent_visual_dialogue,
                     business_knowledge=business_knowledge,
+                    interaction_mode=interaction_mode,
                 )
                 frozen_snapshot, wrote_runtime_state = await asyncio.to_thread(
                     commit_continuity_patch,
@@ -266,13 +322,24 @@ class AgentRuntime:
             if wrote_runtime_state:
                 await self.push_current_state(session_id, char)
 
+            if interaction_mode == "scene_transition":
+                await self.sender.send_chunk(
+                    session_id,
+                    StreamChunk(type="scene_divider", content="新场景"),
+                    character=char,
+                )
+
             await self.sender.send_chunk(
                 session_id,
                 StreamChunk(type="text", content=output.reply),
                 character=char,
             )
 
-            memory_candidate = output.memory_candidate or output.immediate_memory
+            memory_candidate = (
+                None
+                if interaction_mode == "scene_transition"
+                else output.memory_candidate or output.immediate_memory
+            )
             if memory_candidate:
                 bg_tasks.schedule(
                     self._async_evaluate_memory_candidate(
@@ -284,18 +351,23 @@ class AgentRuntime:
                     )
                 )
 
+            persisted_user_text = interaction_summary or content
             bg_tasks.schedule(self._async_append_daily(
                 char,
-                content,
+                persisted_user_text,
                 output.reply,
                 image_job.dynamic_prompt if image_job else None,
+                interaction_mode=interaction_mode,
             ))
-            bg_tasks.schedule(
-                self._async_append_chat_history(char, content, output.reply)
-            )
+            if interaction_mode == "scene_transition":
+                bg_tasks.schedule(self._async_append_scene_transition(char, output.reply))
+            else:
+                bg_tasks.schedule(
+                    self._async_append_chat_history(char, content, output.reply)
+                )
             if memory_settings().get("vector_recall_enabled", True):
                 bg_tasks.schedule(
-                    self._async_index_vector_memory(char, content, output.reply)
+                    self._async_index_vector_memory(char, persisted_user_text, output.reply)
                 )
             due_condense_targets = bump_turn_and_due_targets(char)
             if due_condense_targets:
@@ -325,7 +397,8 @@ class AgentRuntime:
             except Exception as e:
                 logger.debug("write_last_chat failed: %s", e)
 
-            history.append(f"{user_label}：{content}")
+            if interaction_mode != "scene_transition":
+                history.append(f"{user_label}：{content}")
             history.append(f"{char_name}：{output.reply}")
             self.chat_history_buffer[buffer_key] = history[-MAX_HISTORY_TURNS:]
 
@@ -476,12 +549,16 @@ class AgentRuntime:
         user_msg: str,
         reply: str,
         photo_prompt: str | None = None,
+        interaction_mode: str = "chat",
     ):
         try:
             now = datetime.now().strftime("%H:%M")
             user_label = get_user_pet_name(character)
             char_name = get_character_name(character)
-            content = f"### {now} {user_label}说：\n{user_msg}\n\n### {char_name}说：\n{reply}"
+            if interaction_mode == "scene_transition":
+                content = f"### {now} 场景切换：\n{user_msg}\n\n### 新场景：\n{reply}"
+            else:
+                content = f"### {now} {user_label}说：\n{user_msg}\n\n### {char_name}说：\n{reply}"
             if photo_prompt:
                 content += f"\n\n📷 {photo_prompt}"
             append_daily_memory(character, content)
@@ -493,6 +570,12 @@ class AgentRuntime:
             append_chat_pair(character, user_msg, reply)
         except Exception as e:
             logger.error("Append chat_history failed for %s: %s", character, e)
+
+    async def _async_append_scene_transition(self, character: str, reply: str):
+        try:
+            append_scene_transition(character, reply)
+        except Exception as e:
+            logger.error("Append scene transition failed for %s: %s", character, e)
 
     async def _async_index_vector_memory(self, character: str, user_msg: str, reply: str):
         try:

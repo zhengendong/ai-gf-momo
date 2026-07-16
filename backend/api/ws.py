@@ -105,6 +105,31 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                     target=message_data.get("target", "all"),
                 )
 
+            elif msg_type == "scene_transition":
+                character = (
+                    message_data.get("character_id")
+                    or message_data.get("character")
+                    or get_active()
+                )
+                try:
+                    await runtime.handle_scene_transition(
+                        session_id,
+                        character,
+                        mode=message_data.get("mode", "auto"),
+                        concept=message_data.get("concept", ""),
+                    )
+                except ValueError as e:
+                    await manager.send_chunk(
+                        session_id,
+                        StreamChunk(type="status_update", content=str(e)),
+                        character=character,
+                    )
+                    await manager.send_chunk(
+                        session_id,
+                        StreamChunk(type="done", content=""),
+                        character=character,
+                    )
+
             else:
                 logger.warning("Unknown websocket message type: %s", msg_type)
 

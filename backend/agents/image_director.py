@@ -36,6 +36,7 @@ class VisualContinuityAgent:
         previous_state: dict[str, Any],
         recent_dialogue: list[dict[str, str]] | None = None,
         business_knowledge: str = "",
+        interaction_mode: str = "chat",
     ) -> ContinuityOutput:
         """Resolve every turn; retry once when JSON or state structure is invalid."""
         payload = {
@@ -43,6 +44,7 @@ class VisualContinuityAgent:
             "user_message": user_message,
             "character_reply": reply,
             "image_goal": image_goal,
+            "interaction_mode": interaction_mode,
             "recent_dialogue": list(recent_dialogue or [])[-16:],
             "previous_state": {
                 "version": int(previous_state.get("version") or 0),

@@ -12,7 +12,7 @@ class StreamChunk(BaseModel):
     """流式响应块（WebSocket）"""
     type: str = Field(
         ...,
-        description="类型: text, image, image_status, status_update, state_update, memory_updated, done",
+        description="类型: text, scene_divider, image, image_status, status_update, state_update, memory_updated, done",
     )
     content: Optional[str] = Field(None, description="文本内容")
     url: Optional[str] = Field(None, description="图片 URL")

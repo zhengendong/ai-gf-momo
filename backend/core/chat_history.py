@@ -81,6 +81,23 @@ def append_chat_pair(character: str, user_text: str, assistant_text: str):
     })
 
 
+def append_scene_transition(character: str, assistant_text: str, label: str = "新场景"):
+    """Persist a scene boundary and its narration without a synthetic user bubble."""
+    messages = read_chat_history(character)
+    messages.append(normalize_message({
+        "role": "system",
+        "type": "scene_divider",
+        "content": label,
+    }))
+    messages.append(normalize_message({
+        "role": "assistant",
+        "type": "text",
+        "content": strip_photo_prompt_block(assistant_text),
+        "completed": True,
+    }))
+    write_chat_history(character, messages)
+
+
 def clear_chat_history(character: str):
     write_chat_history(character, [])
 

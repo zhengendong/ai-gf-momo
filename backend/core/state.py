@@ -29,20 +29,17 @@ def _character_name(character: str) -> str:
     return get_character_name(character)
 
 
-def _mood_section(character: str) -> str:
-    return f"{_character_name(character)}的心情状态"
-
-
 def _allowed_sections(character: str) -> set[str]:
-    return {"穿着", "场景细节", _mood_section(character), f"{character}的心情状态", "小桃的心情状态"}
+    return {"穿着", "场景细节"}
 
 
 def _section_aliases(character: str) -> dict:
-    mood = _mood_section(character)
     return {
-        "心情状态": mood,
-        "表情": mood,
-        "小桃的心情状态": mood,
+        "心情状态": None,
+        "表情": None,
+        "小桃的心情状态": None,
+        f"{_character_name(character)}的心情状态": None,
+        f"{character}的心情状态": None,
         "房间": "场景细节",
         "地点": "场景细节",
         "裙子": "穿着",
@@ -117,7 +114,6 @@ def capture_state_snapshot(character: str) -> dict:
 def state_updates_from_effects(character: str, effects: list[dict]) -> dict | None:
     """Build legacy updates from completed effects without mutating state."""
     status_updates: dict[str, str] = {}
-    mood = _mood_section(character)
     for effect in effects or []:
         if not isinstance(effect, dict) or effect.get("status", "completed") != "completed":
             continue
@@ -130,10 +126,6 @@ def state_updates_from_effects(character: str, effects: list[dict]) -> dict | No
             tags = effect.get("tags") or effect.get("scene_tags")
             if tags:
                 status_updates["场景细节"] = _tags_to_markdown(tags)
-        elif effect_type in {"mood_change", "mood_update"}:
-            value = effect.get("value") or effect.get("tags")
-            if value:
-                status_updates[mood] = _tags_to_markdown(value)
     if not status_updates:
         return None
     return {"status": status_updates}
@@ -147,14 +139,19 @@ def read_status(character: str) -> str:
         default = _default_status(character)
         write_markdown(path, default)
         return default
-    return read_markdown(path)
+    content = read_markdown(path)
+    migrated = _strip_legacy_mood_sections(content)
+    if migrated != content:
+        write_markdown(path, migrated)
+        logger.info("已移除旧心情状态: %s/status.md", character)
+    return migrated
 
 
 def write_status(character: str, content: str):
     """写入角色的状态"""
     path = get_status_path(character)
     path.parent.mkdir(parents=True, exist_ok=True)
-    write_markdown(path, content)
+    write_markdown(path, _strip_legacy_mood_sections(content))
     logger.info(f"状态已更新: {character}/status.md")
 
 
@@ -190,8 +187,8 @@ def apply_state_operations(character: str, operations: list[dict]) -> dict:
     """Validate and atomically project completed V2 state operations.
 
     Wardrobe operations are reduced against the canonical layered snapshot.
-    Scene and mood operations reuse the existing Markdown compatibility
-    projection.  No file is changed until every operation validates.
+    Scene operations reuse the existing Markdown compatibility projection.
+    No file is changed until every operation validates.
     """
     operations = operations or []
     current_status = read_status(character)
@@ -226,11 +223,9 @@ def apply_state_operations(character: str, operations: list[dict]) -> dict:
             if not tags:
                 raise ValueError("scene operation requires complete tags")
             status_updates["场景细节"] = _tags_to_markdown(tags)
-        elif domain == "mood" and action in {"set", "update", "change"}:
-            value = operation.get("value") or operation.get("tags")
-            if not value:
-                raise ValueError("mood operation requires a value")
-            status_updates[_mood_section(character)] = _tags_to_markdown(value)
+        elif domain == "mood":
+            logger.info("忽略兼容输入中的旧 mood 状态操作")
+            continue
         else:
             raise ValueError(f"unsupported state operation: {domain}.{action}")
 
@@ -505,7 +500,14 @@ def _default_status(character: str = "momo", outfit_tags=None) -> str:
 - indoors
 - evening
 - warm_lighting
-
-## {char_name}的心情状态
-- 等待开始新的对话
 """
+
+
+def _strip_legacy_mood_sections(content: str) -> str:
+    """Remove obsolete mood sections while preserving all visual facts."""
+    cleaned = re.sub(
+        r"(?ms)\n*^##[ \t]+[^\n]*心情状态[ \t]*\n.*?(?=^##[ \t]+|\Z)",
+        "\n",
+        str(content or ""),
+    )
+    return cleaned.rstrip() + "\n"

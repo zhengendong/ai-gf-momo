@@ -12,19 +12,24 @@
         <p>你好呀～有什么想和{{ characterName }}说的吗？</p>
       </div>
       <div v-for="msg in messages" :key="msg.id" class="msg" :class="msg.role">
-        <div v-if="isImage(msg)" class="image-bubble">
-          <img :src="imageSrc(msg)" :alt="`${characterName}的照片`" />
-          <p v-if="msg.content">{{ msg.content }}</p>
+        <div v-if="msg.type === 'scene_divider'" class="scene-divider">
+          <span>{{ msg.content || '新场景' }}</span>
         </div>
-        <div v-else-if="msg.type === 'image_pending'" class="image-pending">
-          <div class="typing"><span></span><span></span><span></span></div>
-          <p>{{ msg.content || '正在生成图片...' }}</p>
-        </div>
-        <div v-else-if="msg.type === 'image_error'" class="image-error">
-          {{ msg.content || '图片生成失败' }}
-        </div>
-        <div class="bubble" v-else-if="msg.content">{{ msg.content }}</div>
-        <div class="time">{{ formatTime(msg.timestamp) }}</div>
+        <template v-else>
+          <div v-if="isImage(msg)" class="image-bubble">
+            <img :src="imageSrc(msg)" :alt="`${characterName}的照片`" />
+            <p v-if="msg.content">{{ msg.content }}</p>
+          </div>
+          <div v-else-if="msg.type === 'image_pending'" class="image-pending">
+            <div class="typing"><span></span><span></span><span></span></div>
+            <p>{{ msg.content || '正在生成图片...' }}</p>
+          </div>
+          <div v-else-if="msg.type === 'image_error'" class="image-error">
+            {{ msg.content || '图片生成失败' }}
+          </div>
+          <div class="bubble" v-else-if="msg.content">{{ msg.content }}</div>
+          <div class="time">{{ formatTime(msg.timestamp) }}</div>
+        </template>
       </div>
       <div v-if="isLoading" class="msg assistant">
         <div class="typing"><span></span><span></span><span></span></div>
@@ -102,6 +107,16 @@ watch(() => props.messages.length, async () => {
 .msg { margin-bottom: 12px; display: flex; flex-direction: column; }
 .msg.user { align-items: flex-end; }
 .msg.assistant { align-items: flex-start; }
+.msg.system { align-items: stretch; }
+.scene-divider {
+  width: 100%; display: flex; align-items: center; gap: 10px;
+  color: #9a93ad; font-size: 11px; letter-spacing: .5px;
+  padding: 7px 0;
+}
+.scene-divider::before, .scene-divider::after {
+  content: ''; height: 1px; flex: 1; background: #ded9eb;
+}
+.scene-divider span { white-space: nowrap; }
 .bubble {
   max-width: 75%; padding: 10px 14px; border-radius: 18px;
   font-size: 14px; line-height: 1.5; word-break: break-word;

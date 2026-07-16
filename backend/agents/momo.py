@@ -85,6 +85,7 @@ class MomoAgent:
         conversation_summary: str = "",
         recalled_memories: str = "",
         business_knowledge: str = "",
+        interaction_mode: str = "chat",
     ) -> AgentOutput:
         """
         处理用户消息
@@ -108,6 +109,7 @@ class MomoAgent:
             conversation_summary=conversation_summary,
             recalled_memories=recalled_memories,
             business_knowledge=business_knowledge,
+            interaction_mode=interaction_mode,
         )
         total_tokens = estimate_tokens(system_prompt + prompt)
 
@@ -121,6 +123,7 @@ class MomoAgent:
                 conversation_summary=conversation_summary,
                 recalled_memories=recalled_memories,
                 business_knowledge=business_knowledge,
+                interaction_mode=interaction_mode,
             )
 
         # 3. 调用 LLM

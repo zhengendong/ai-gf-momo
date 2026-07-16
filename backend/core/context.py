@@ -97,6 +97,7 @@ def assemble_momo_prompt(
     conversation_summary: str = "",
     recalled_memories: str = "",
     business_knowledge: str = "",
+    interaction_mode: str = "chat",
 ) -> str:
     """
     组装 Momo Agent 的 user prompt
@@ -155,8 +156,13 @@ def assemble_momo_prompt(
         "生成回复前必须以 status.md 为本轮起点。若历史对话与 status.md 的任何事实冲突，"
         "以 status.md 为准；不得否认、改写、遗漏或凭空补造其中任何当前事实。"
     )
-    parts.append("## 6. 当前用户消息")
-    parts.append(f"{user_pet_name}说：{user_message}")
+    if interaction_mode == "scene_transition":
+        parts.append("## 6. 当前交互：构建下一幕")
+        parts.append("这是界面触发的剧情推进任务，不是用户角色说出的台词。")
+        parts.append(user_message)
+    else:
+        parts.append("## 6. 当前用户消息")
+        parts.append(f"{user_pet_name}说：{user_message}")
     parts.append("")
     parts.append("请以 JSON 格式输出。")
 

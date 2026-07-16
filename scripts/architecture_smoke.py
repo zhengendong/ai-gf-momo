@@ -13,11 +13,13 @@ from backend.config import settings
 from backend.core.business_knowledge import route_domains
 from backend.core.context import assemble_momo_prompt
 from backend.core.image_job import build_image_job
+from backend.core.runtime import build_scene_transition_instruction
 from backend.core.state import (
     apply_state_operations,
     apply_state_updates,
     capture_state_snapshot,
     merge_continuity_patch,
+    read_status,
     state_updates_from_effects,
 )
 from backend.services.prompt_builder import (
@@ -75,6 +77,11 @@ def main():
             momo_prompt = assemble_momo_prompt(char, "你现在穿着什么？")
             assert "本轮开始时的客观视觉事实" in momo_prompt
             assert "历史对话与 status.md" in momo_prompt
+            assert "心情状态" not in momo_prompt
+            assert "心情状态" not in read_status(char)
+            assert "用户对下一幕的构想：几天后在学校重逢" in build_scene_transition_instruction(
+                "manual", "几天后在学校重逢"
+            )
 
             updates = state_updates_from_effects(char, [{
                 "type": "replace_outfit",

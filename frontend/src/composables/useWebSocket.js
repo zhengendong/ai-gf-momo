@@ -31,7 +31,17 @@ export function useWebSocket() {
       try {
         const data = JSON.parse(event.data)
 
-        if (data.type === 'text' && data.content) {
+        if (data.type === 'scene_divider') {
+          messages.value.push({
+            id: `scene_${Date.now()}`,
+            role: 'system',
+            type: 'scene_divider',
+            content: data.content || '新场景',
+            timestamp: new Date(),
+            completed: true
+          })
+
+        } else if (data.type === 'text' && data.content) {
           const lastMsg = messages.value[messages.value.length - 1]
           if (lastMsg && lastMsg.role === 'assistant' && lastMsg.type !== 'image' && !lastMsg.completed) {
             lastMsg.content += data.content

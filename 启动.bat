@@ -34,14 +34,13 @@ if not exist "node_modules" (
     exit /b 1
   )
 )
-if not exist "dist\index.html" (
-  echo Building frontend for first use...
-  call npm run build
-  if errorlevel 1 (
-    echo Frontend build failed.
-    pause
-    exit /b 1
-  )
+REM Always rebuild so a launcher restart cannot serve an older frontend bundle.
+echo Building frontend...
+call npm run build
+if errorlevel 1 (
+  echo Frontend build failed.
+  pause
+  exit /b 1
 )
 cd ..
 
@@ -94,7 +93,8 @@ if not "%BACKEND_LISTENER_COUNT%"=="1" (
   exit /b 1
 )
 
-start http://127.0.0.1:%SERVER_PORT%
+REM Add a cache-busting query so an already-open browser tab loads the new bundle.
+start http://127.0.0.1:%SERVER_PORT%/?v=%RANDOM%%RANDOM%
 
 echo.
 echo Started! http://127.0.0.1:%SERVER_PORT%

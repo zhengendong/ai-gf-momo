@@ -23,6 +23,10 @@
       />
       <div class="right-side">
         <StatePanel :character-state="characterState" />
+        <SceneTransitionPanel
+          :disabled="!isConnected || isLoading"
+          @transition="onSceneTransition"
+        />
         <ImageGallery
           :character-name="profile.name"
           :active-char-id="activeCharId"
@@ -44,6 +48,7 @@ import CharacterDirectory from './components/CharacterDirectory.vue'
 import StatusBar from './components/StatusBar.vue'
 import SettingsPanel from './components/SettingsPanel.vue'
 import StatePanel from './components/StatePanel.vue'
+import SceneTransitionPanel from './components/SceneTransitionPanel.vue'
 
 const {
   isConnected, messages, lastMessage,
@@ -87,6 +92,17 @@ const onSendMessage = (text) => {
     timestamp: new Date()
   })
   sendMessage({ type: 'text', character_id: characterId, content: text })
+}
+
+const onSceneTransition = ({ mode, concept }) => {
+  if (!isConnected.value || isLoading.value) return
+  isLoading.value = true
+  sendMessage({
+    type: 'scene_transition',
+    character_id: activeCharId.value,
+    mode,
+    concept,
+  })
 }
 
 const onRefreshMemory = () => {
