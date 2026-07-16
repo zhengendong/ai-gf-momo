@@ -1,79 +1,63 @@
 # AI_gf_momo 架构索引
 
-> 更新规则：凡修改模块职责、数据流、输出契约、配置入口、运行数据格式或验证方式，必须同步更新本文档和 `AGENTS.md` 中对应约束。
+> 修改模块职责、数据流、输出契约、配置入口、运行数据格式或验证方式时，必须同步更新本文档和 `AGENTS.md`。
 
-## 目标与边界
+## 系统边界
 
-项目是多角色沉浸式聊天与 ComfyUI 生图应用。正常一轮对话保持一次同步主角色模型调用：主 Agent 负责角色决策、自然回复、已完成状态操作、高层图片目标和长期记忆候选；确定性后端负责状态归约和提交。只有图片轮次才在后台按需调用 `ImageDirectorAgent` 设计镜头，记忆审核继续由独立后台 Agent 完成；协议修复模型只允许在本轮输出校验失败的异常路径调用一次。
+项目是多角色沉浸式聊天与 ComfyUI 生图应用。角色人格属于 `characters/<character>/identity.md`，由用户维护；通用运行协议属于 `config/agent.md`；全局领域知识位于 `config/knowledge/`。
 
-角色人格属于 `characters/<character>/identity.md`，由用户维护。通用运行规则属于 `config/agent.md`，全局业务知识属于 `config/knowledge/`。历史召回和长期记忆写入是两条独立的数据链路。
+正常持久化对话使用两个职责分离的同步模型步骤：
+
+1. `MomoAgent` 专心完成角色决策和自然回复，只提出高层 `image_goal` 与长期记忆候选。
+2. `VisualContinuityAgent` 每轮理解用户输入、角色实际回复和上一轮快照，更新服饰与场景；存在 `image_goal` 时还负责动作、姿势和镜头设计。
+
+状态提交成功后才向用户发送角色回复，并以同一个冻结快照创建图片任务。MemoryAgent 的候选审核和 ComfyUI 生成仍在后台执行。
 
 ## 顶层目录
 
 | 路径 | 职责 |
 | --- | --- |
-| `backend/agents/` | 主角色 Agent、记忆 Agent、按需图片导演、后台图片管线 |
-| `backend/core/` | 运行时编排、上下文、分层服饰/状态归约、记忆策略、事务检查、业务知识路由、ImageJob |
-| `backend/services/` | LLM、ComfyUI、最终提示词组装、TTS 等服务适配 |
-| `backend/tools/` | 面向 Agent/管线的工具封装；ImageTool 将 ImageJob 编译为工作流 |
-| `backend/api/` | HTTP / WebSocket 接口 |
-| `characters/<id>/` | 角色资料、运行时状态、记忆、向量库和用户图片；不要随意改动运行数据 |
-| `config/` | 全局运行配置、主 Agent 协议、全局业务知识 |
-| `scripts/` | 诊断与离线烟雾测试 |
-| `docs/` | 架构和开发协作资料 |
-
-## 服务地址与端口
-
-根目录 `.env` 的 `SERVER_PORT` 是后端端口唯一配置来源，默认后端绑定 `127.0.0.1:8001`。`启动.bat` 用它清理旧后端并启动 `python -m backend.main`；清理时同时终止监听进程及继承其端口的 `spawn_main` 孤儿 Worker，端口未释放时拒绝启动，启动完成后还会校验该端口只有一个监听实例，避免浏览器继续命中旧代码。开发模式下 `frontend/vite.config.js` 读取同一份 `.env`，将 `/api`、`/ws` 和 `/static` 代理到该端口。以后只改 `.env` 的 `SERVER_PORT`，然后重启后端和 Vite。
-
-### 前端部署模式
-
-- `启动.bat` 是日常使用的单服务生产模式：若 `frontend/dist/index.html` 不存在，会先执行一次前端构建；随后只启动 FastAPI，并在同一个 `SERVER_PORT` 提供 `/api`、`/ws`、`/static` 和构建后的 Vue 页面。该模式固定关闭 `SERVER_RELOAD`，浏览器打开 `http://127.0.0.1:<SERVER_PORT>`。
-- `开发启动.bat` 保留开发体验：FastAPI 以 `SERVER_RELOAD=true` 启动，Vite 仍监听 `5173`，并将 `/api`、`/ws`、`/static` 代理至 `.env` 中的 `SERVER_PORT`。
-- 前端源码改动后，日常启动前运行 `构建前端.bat`（或手动在 `frontend/` 执行 `npm run build`）。`frontend/dist/` 是可再生构建产物，不提交 Git。
-- 后端的 Vue 静态托管只对浏览器 HTML 导航执行 `index.html` 回退；不存在的 JS、CSS、图片等资源仍返回 404，避免掩盖构建问题。
+| `backend/agents/` | Momo、视觉连续性、记忆和图片管线 |
+| `backend/core/` | 运行时编排、上下文、状态与服饰模型、记忆策略、ImageJob |
+| `backend/services/` | LLM、ComfyUI、提示词组装、TTS 等适配器 |
+| `backend/tools/` | ImageJob 到 ComfyUI 工作流的工具封装 |
+| `backend/api/` | HTTP 与 WebSocket 接口 |
+| `characters/<id>/` | 用户维护的角色资料、状态、记忆、向量库和图片 |
+| `config/` | 全局配置、Agent 协议、领域知识与工作流映射 |
+| `scripts/` | 离线探针和烟雾测试 |
 
 ## 一轮消息的数据流
 
-```text
-WebSocket / API 输入
-  -> AgentRuntime.handle_message（同一角色串行锁）
-  -> 读取最近对话、状态、摘要、记忆召回
-  -> KnowledgeRouter：按需读取 config/knowledge 的全局领域手册
-  -> MomoAgent：一次同步主 LLM 调用
-  -> AgentOutput V2: reply + state_ops + image_goal + memory_candidate
-  -> 本地事务检查；仅失败时允许一次异常修复调用
-  -> StateReducer 确定性提交 state_ops，写 status.md 并同步 state_snapshot.json
-  -> 冻结本轮提交后的状态快照，再立即发送文本
-  -> image_goal 存在时，后台 ImageDirectorAgent 只读取用户消息、回复、目标、业务知识和冻结状态，输出 ShotSpec
-  -> ShotSpec 编译为不可变 ImageJob；旧 image_intent/photo_prompt 仍走兼容入口
-  -> 记忆写入和图片生成均为后台任务
-  -> 后台记忆实际刷新时推送静默 memory_updated 通知，前端刷新记忆页
-  -> ImageTool：读取 config/settings.json 的全局 comfyui 配置；从 <root_dir>/ComfyUI/user/default/workflows 读取选定工作流，按可选 workflow adapter 注入人物预设 + 冻结服饰/场景 + 画面意图。模型、CLIP、VAE、LoRA 与未覆盖的节点参数保留工作流默认值
-  -> ComfyUI：先连接同 client_id 的 /ws，再 POST /prompt；收到完成事件后 GET /history，再 GET /view 下载最终图 -> 图片历史和应用 WebSocket 图片消息
+```mermaid
+flowchart TD
+  A["用户消息"] --> B["组装身份、历史、状态、召回与领域知识"]
+  B --> C["MomoAgent"]
+  C --> D["reply + image_goal + memory_candidate"]
+  D --> E["VisualContinuityAgent"]
+  E --> F["state_patch + 可选 shot_spec"]
+  F --> G["校验并提交 status.md / state_snapshot.json"]
+  G --> H["冻结提交后的状态"]
+  H --> I["发送角色回复"]
+  H --> J{"存在 image_goal?"}
+  J -- 是 --> K["创建不可变 ImageJob 并后台生图"]
+  J -- 否 --> L["结束图片状态"]
+  I --> M["后台聊天记录、记忆候选与向量任务"]
 ```
 
-关键入口：[AgentRuntime](../backend/core/runtime.py)、[MomoAgent](../backend/agents/momo.py)、[图片导演](../backend/agents/image_director.py)、[状态模块](../backend/core/state.py)、[分层服饰模块](../backend/core/wardrobe.py)、[ImageJob](../backend/core/image_job.py)、[提示词编译器](../backend/services/prompt_builder.py)。
+`AgentRuntime` 对同一角色加 `asyncio.Lock`，因此两轮状态解析和提交不会交错。VisualContinuity 输出先做无写入合并校验，再提交；连续性 JSON 或补丁无效时允许同一个 Agent 修复一次。两次均失败时，本轮不提交状态、不发送角色台词、不创建 ImageJob，只通过系统状态消息提示重试，避免角色说出“做到了”而实际状态未变。
 
-## 主 Agent 契约
+关键入口：`backend/core/runtime.py`、`backend/agents/momo.py`、`backend/agents/image_director.py`、`backend/core/state.py`、`backend/core/wardrobe.py`、`backend/core/image_job.py`。
 
-定义位于 `backend/models/schemas.py` 的 `AgentOutput`。新协议由 `config/agent.md` 约束：
+## MomoAgent 契约
+
+新协议由 `config/agent.md` 约束：
 
 ```json
 {
   "reply": "角色自然回复",
-  "state_ops": [
-    {
-      "domain": "wardrobe",
-      "operation": "remove",
-      "slot": "footwear",
-      "target": "outermost"
-    }
-  ],
   "image_goal": {
-    "required": true,
-    "purpose": "展示本轮已经发生的视觉变化",
-    "subject": "用户要求观看的对象",
+    "purpose": "展示本轮结果",
+    "subject": "需要呈现的对象",
     "visibility": "clear",
     "mood": "shy",
     "rating": "general"
@@ -83,89 +67,104 @@ WebSocket / API 输入
 }
 ```
 
-`state_ops` 只记录本轮已经完成的持久变化；用户请求、犹豫、拒绝、承诺稍后执行都不能提交。主 Agent 不再重建变化后的完整服饰，也不再设计镜头标签。`image_goal` 只描述图片交付的目的、主体、可见程度、情绪和 rating，不包含人物外貌、服饰、场景、镜头、画质、负面提示词或模型配置。
+MomoAgent 不输出 `state_ops`、服饰、场景或镜头标签。坐、站、躺、穿脱、换场景等事实只需自然地体现在 `reply`；`image_goal` 只表达是否要交付图片以及交付目的，不选择工作流、模型或提示词。每轮上下文中的 `status.md` 是上一轮视觉还原已经提交的客观事实；最近对话、记忆或角色惯性与其冲突时，主 Agent 必须以 `status.md` 为本轮起点，不得否认或凭空恢复视觉状态。解析器仍保留旧字段以兼容外部结构，但正常运行时会忽略旧 `state_ops/effects/image_intent/photo_prompt/state_updates`。
 
-主 Agent把一轮输出视为一个对话事务：先以 `status.md` 为起点形成角色决定和 `reply`，再提交回复中已经完成的 `state_ops`，随后判断是否存在 `image_goal`，最后才提出可选 `memory_candidate`。坐、站、躺、转身等即时动作只属于回复和图片，不属于持久状态操作。事务校验在回复发送前完成；若回复声称状态或视觉交付已完成但缺少对应结构，异常修复仍失败时会替换为明确的未完成降级回复，而不是保留虚假叙事。
+`persist_context=false` 用于不进入角色持久化链路的特殊回复，因此不会改状态、写历史或生图。
 
-`effects`、`image_intent`、`photo_prompt` 和 `state_updates` 仍由后端兼容层读取，供已有模型输出和手动接口过渡使用；新提示词不再要求模型输出它们。
+## VisualContinuityAgent 契约
 
-## 状态与并发
+协议位于 `config/image_director.md`，实现类为 `VisualContinuityAgent`；`ImageDirectorAgent` 名称只作为导入兼容别名保留。每个持久化回合都调用它，而不以是否生图为条件。
 
-- `characters/<id>/memory/status.md`：供主 Agent 和界面读取的 Markdown 投影。
-- `characters/<id>/memory/state_snapshot.json`：机器可读快照；V2 包含版本、分层 `wardrobe`、可见服饰兼容投影和场景标签。
-- `backend/core/wardrobe.py`：维护 `upper`、`lower`、`legwear`、`footwear`、`accessories` 五个可扩展槽位；每槽从内到外排列，同一连体衣物可占多个槽位。
-- `apply_state_operations()`：先完整验证本轮操作，再由 Reducer 确定性提交；单件移除不会要求模型重建其他服饰层。
-- 旧平面标签第一次读取时保守投影到分层结构；未知标签进入 `legacy_visible`，不会因无法分类而误推断裸露。
-- `state_updates_from_effects()`：旧协议兼容转换。
-- `AgentRuntime` 对每个角色使用 `asyncio.Lock`，防止同一角色的两轮状态提交交错。
+输入包括：
 
-状态写入后再创建图片任务。局部姿势、镜头和动作只属于图片，不写入持久状态。
+- 此前最多 8 轮结构化对话，用于理解剧情承接；
+- 当前用户消息；
+- Momo 实际 `reply`；
+- 可选 `image_goal`；
+- 上一轮完整服饰槽位、明确缺失标记、可见标签和场景标签；
+- 本轮命中的领域知识。
 
-## ImageJob 与生图引擎
+最近剧情只补充动作承接、人物关系和观看目标，不能覆盖上一轮快照；本轮视觉变化仍以当前角色实际 `reply` 为主要依据。
 
-`ImageDirectorAgent` 是按需后台专业 Agent，只在新协议存在 `image_goal` 时调用。它不扮演角色、不修改状态、不选择工作流或模型，只把高层交付目标和冻结状态设计成动作、姿势、表情、镜头、光线与 rating 的 `ShotSpec`。
+输出包括：
 
-`ImageJob` 是一次图片生成的不可变内部任务。创建时冻结：
+```json
+{
+  "reason": "内部连续性判断摘要",
+  "state_patch": {
+    "wardrobe": {
+      "footwear": {"mode": "replace", "layers": []}
+    },
+    "scene": null
+  },
+  "shot_spec": null
+}
+```
 
-- 角色 ID；
-- 本轮回复；
-- 高层 `image_goal` 和图片导演 `ShotSpec`（旧协议可直接使用 `image_intent`）；
-- 从 `ShotSpec` 编译出的动态画面标签；
-- 本轮提交后的服饰、场景和状态版本；
+`state_patch` 每轮必填。没有变化时 `wardrobe={}`、`scene=null`；未出现的服饰槽位保持上一轮原样。被修改槽位使用 `mode=replace`，`layers` 是变化后完整的、从内到外排列的层级。场景确定发生变化时，以 `mode=replace` 提交变化后的完整场景标签。
 
-后台图片导演和生成任务只读取这个快照。它们不会再次读取当前 `status.md`，因此后一轮换装或换场景不会污染已排队图片。
+只有 `image_goal` 存在时 `shot_spec` 才是对象，负责动作、姿势、表情、景别、角度、焦点、光线、rating 和一个可选强化组。它不包含服饰、场景、人物外观、质量、负面词、工作流或模型。
 
-最终 prompt 由 `build_image_prompt()` 统一注入：角色视觉预设、冻结服饰的可见层投影、冻结场景和动态 ShotSpec 标签。外层移除后内层自动成为可见层；`footwear` 与 `legwear` 都为空才投影 `barefoot`；明确空的上下身槽位投影相应身体状态。前端全局 `comfyui.root_dir` 是本地 ComfyUI 根目录，后端从 `<root_dir>/ComfyUI/user/default/workflows` 读取 `workflow`；该工作流决定模型链路。`negative_prompt`、采样器、调度器、步数、CFG 和尺寸留空时继承该工作流，明确填写时才覆盖对应节点。主 Agent 与 ImageJob 不携带工作流或模型选择。
+VisualContinuityAgent 会在固定协议后附加 `config/knowledge/visual_prompting.md`。该手册从 `data/pxlsan-标签选择器-完整内容.xlsx` 的服装、动作、构图、场景和光影栏目蒸馏而来，只保留组合规律、代表性词汇、few-shot、预算和冲突规则，不把原表数千行标签塞入每轮上下文。ShotSpec 限制为动作最多 3 个、姿势 2 个、表情 2 个、光线 2 个；场景替换最多 4 个标签。
 
-`config/workflow_adapters/<workflow-stem>.json` 是可选的后端维护映射，不在前端展示。它声明当前工作流的主正/负提示词、主采样器、尺寸和保存节点；存在映射时，后端仅改这些节点，避免复杂工作流的二次采样、局部提示词或修复分支被误改。映射不存在时保留旧的按节点类型自动识别行为。当前 `ANIMA_workflow.json` 已配置映射。
+## 服饰与状态模型
 
-提交任务时，`ComfyUIService.submit_and_wait()` 会先使用同一 `client_id` 连接 ComfyUI `/ws`，再请求 `/prompt`，等待 `executing(node=null)` 完成事件；随后只请求一次 `/history/{prompt_id}` 取得最终图片元数据，图片数据仍由 `/view` 获取。下载时必须保留 history 返回的 `filename`、`subfolder` 和 `type`：存在 `SaveImage` 时优先读取 `type=output`，只有 `PreviewImage` 时读取 `type=temp`。二进制预览帧不转发，应用前端继续显示既有的“生图中”占位与最终图片。
+`state_snapshot.json` 是状态机、VisualContinuityAgent 和 ImageJob 使用的结构化事实源；`status.md` 不再维护旧的平铺服饰标签，而是由同一提交函数生成的可读投影。服饰区固定按“上身、下身、腿部、鞋子、配饰”展示，例如 `上身：topless`、`下身：white lace panties`。任何状态提交都必须同时更新两者，禁止再次写入 `white`、`lace`、`panties` 这类拆分服饰标签。
 
-## 全局业务知识与渐进加载
+服饰保持五个简化槽位：
 
-`config/knowledge/` 是当前全角色共用的领域业务知识库，可理解为全局 Rule Packs，但按“领域手册”维护，而不是为每件衣服创建一个 Pack：
-
-| 文件 | 内容 |
+| 槽位 | 内容 |
 | --- | --- |
-| `router.json` | 用户输入与模糊续接时的领域触发信号；可直接调整，无需改代码 |
-| `wardrobe.md` | 换装完整性、服饰常识与审美 |
-| `scene.md` | 地点、时间、光线与场景连续性 |
-| `photography.md` | 生图时的构图、姿势、镜头和 rating 原则 |
-| `intimacy.md` | 亲密互动的连续性和状态约束 |
-| `recall.md` | 已召回历史片段在本轮回复中的使用原则 |
+| `upper` | 上身层；Bra 为 `underwear`，上衣为 `outerwear` |
+| `lower` | 下身层；内裤为 `underwear`，裙/裤为 `outerwear` |
+| `legwear` | 袜、丝袜、连裤袜 |
+| `footwear` | 鞋、靴、拖鞋等 |
+| `accessories` | 首饰和配件 |
 
-`KnowledgeRouter` 根据当前输入和必要时最近对话，加载命中的完整领域手册并写入“本轮适用业务知识”。它不调用 LLM。当前不实现角色专属知识包；未来若需要，可在该路由器之后增加“角色挂载的覆盖手册”，但不能复制全局核心规则。
+Bra 和内裤不是顶层槽位，而是 `upper/lower` 的内层类别。每件衣物从状态建模开始就使用一个精简短语，例如 `white_lace_panties`，而不是把颜色、材质和类型拆成互相独立的标签。这样既保留了用户要求的简单槽位，又能表达“脱掉内裤但裙子仍在”或“脱掉裙子后内裤成为可见层”。同一连体衣物可用相同 `id` 占据 `upper` 和 `lower`。
 
-### 记忆的两条独立链路
+重要规则：
 
-**历史召回**发生在主 LLM 调用之前：`memory_policy.recall_vector_context()` 根据用户输入判断是否查询向量库；命中结果作为 `vector_recall` 放进本轮上下文。`recall.md` 只告诉模型如何谨慎使用这些片段，不能写入长期记忆，也不能改变当前状态。
+- 每个槽位从内到外排列；只替换本轮变化的槽位。
+- `no_bra/no_panties` 仅保留为结构化快照中的隐藏内衣连续性事实，不进入前端或生图提示词。
+- `footwear` 与 `legwear` 独立；两者都空时才投影 `barefoot`，但完全裸露时由 `completely_nude` 单独表达，不再重复 `barefoot`。
+- 仅空上身/下身分别投影 `topless/bottomless`；四个衣物槽位均空时只投影 `completely_nude`，不再叠加 `topless`、`bottomless`、`no_bra` 或 `no_panties`。
+- 未知旧标签进入 `legacy_visible`，原样保留并抑制不可靠的裸露推断。
+- 旧 `apply_state_operations()`、`reduce_wardrobe()` 和 `state_updates_from_effects()` 保留作兼容入口，不参与新运行时主链路。
 
-**长期记忆写入**发生在主 LLM 返回之后：主 Agent只在可能稳定且重要的事实出现时填写 `memory_candidate`。运行时将它连同本轮用户消息和角色回复交给后台 `MemoryAgent.evaluate_candidate()`；MemoryAgent 二次审核、去重并在通过时刷新完整的 `long_term.md`。这不依赖向量召回，也不应因用户只是提及“上次”就自动写入。
+状态必须先提交，再创建 ImageJob。图片任务携带创建当时的快照，后台不得重新读取最新状态。
 
-当候选审核或后台沉淀实际刷新 `long_term.md` / `soul.md` 后，运行时向当前会话发送不展示给用户的 `memory_updated` WebSocket 消息。前端“记忆”设置页仅在当前角色匹配且标签打开时重新读取相关文档。
+## ImageJob 与 ComfyUI
 
-## 一致性、异常修复与降级
+`ImageJob` 冻结角色、本轮回复、`image_goal`、`shot_spec`、动态画面标签、服饰、场景和状态版本。`build_image_prompt()` 统一注入角色视觉预设、冻结服饰的可见层、冻结场景和动态镜头标签。普通画面不使用权重；一个可选强化组以 `1.05-1.20` 编译。局部 `close-up/macro_shot` 配合部位焦点时，角色身份和裸露事实保持原权重，外貌细节与服饰整体自动编译为 `(..., ...:0.9)`，减少对局部主体的干扰；显式权重一律用圆括号，禁止 `[...:0.9]`。
 
-`output_monitor.py` 在提交前确定性检查旧状态字段和 V2 `state_ops/image_goal`，包括操作能否归约、回复是否遗漏已完成状态、明确视觉交付是否漏掉图片目标。纯观看追问可以复述已经提交的状态而不重复产生 `state_ops`；同一轮同时提出脱、穿、换或场景变化时仍必须提交对应操作。正常路径不调用第二个同步模型。
+工作流和模型由 `config/settings.json` 的全局 `comfyui` 配置决定。`root_dir` 指向本地 ComfyUI 根目录，工作流从 `<root_dir>/ComfyUI/user/default/workflows` 读取。前端空值继承工作流节点默认值，明确填写才覆盖。存在 `config/workflow_adapters/<workflow-stem>.json` 时只能改映射声明的受控节点。
 
-只有校验失败时，`MomoAgent.repair_output()` 才允许基于当前用户消息、状态、无效输出和问题列表修复一次完整事务；修复后再次执行同一确定性检查。若仍失败，运行时清空状态、图片和记忆副作用，并将回复降级为“动作没有成功完成”，不再保留与实际状态矛盾的成功叙事。
+`ComfyUIService.submit_and_wait()` 先连接同一 `client_id` 的 `/ws`，再提交 `/prompt`；收到完成事件后只读一次 `/history/{prompt_id}`，随后根据 history 返回的 `filename`、`subfolder` 和 `type` 调用 `/view`。有 SaveImage 时优先 `type=output`，只有 PreviewImage 时使用 `type=temp`。二进制预览帧不替代最终图片。
 
-图片导演失败时使用最小 ShotSpec 兜底；ComfyUI 失败不会回滚已经提交的现实状态。图片历史的新记录附带 `job_id`、冻结状态版本、`image_goal`、`ShotSpec` 和动态提示词，便于区分角色决策、状态、构图和生成阶段的问题。
+## 记忆和领域知识
+
+`config/knowledge/router.json` 根据当前输入和最近对话选择领域手册，不调用 LLM。领域原则分别维护在 `wardrobe.md`、`scene.md`、`photography.md`、`intimacy.md` 和 `recall.md`，不要重新塞回 `agent.md`。
+
+向量召回与长期记忆写入是两条独立链路：召回只为本轮提供参考；Momo 的 `memory_candidate` 只是候选，后台 `MemoryAgent` 审核、去重后才能刷新 `long_term.md`。实际刷新后，通过静默 `memory_updated` 消息通知前端。
+
+## 服务地址和前端模式
+
+根目录 `.env` 的 `SERVER_PORT` 是后端端口唯一来源。`启动.bat` 使用构建后的 Vue 页面并关闭 reload；`开发启动.bat` 启动 FastAPI reload 与 Vite，`frontend/vite.config.js` 从同一 `.env` 读取代理端口。前端源码变化后运行 `构建前端.bat` 或在 `frontend/` 执行 `npm run build`。
 
 ## 维护入口
 
-| 想调整什么 | 首选位置 |
+| 调整目标 | 首选位置 |
 | --- | --- |
-| 全角色通用的思考顺序、自然对话、自主性、输出 JSON | `config/agent.md` |
-| 服饰/场景/摄影/亲密互动业务规则 | `config/knowledge/<domain>.md` |
-| 哪类输入加载哪本领域手册 | `config/knowledge/router.json` |
-| 角色人格、关系、口癖 | `characters/<id>/identity.md`（仅用户明确要求时改） |
-| 结构化状态格式、状态操作解释 | `backend/core/state.py`、`backend/models/schemas.py` |
-| 服饰槽位、层级归约和可见投影 | `backend/core/wardrobe.py` |
-| 高层图片目标到 ShotSpec | `config/image_director.md`、`backend/agents/image_director.py` |
-| ShotSpec 到最终 prompt 的转换 | `backend/core/image_job.py`、`backend/services/prompt_builder.py` |
-| ComfyUI 工作流节点注入 | `backend/services/comfyui.py` |
-| 复杂工作流的受控节点映射 | `config/workflow_adapters/<workflow-stem>.json` |
+| 角色回复与高层目标协议 | `config/agent.md`、`backend/agents/momo.py` |
+| 视觉状态理解和 ShotSpec | `config/image_director.md`、`backend/agents/image_director.py` |
+| 服饰槽位、层级和可见投影 | `backend/core/wardrobe.py` |
+| 状态提交和 Markdown 投影 | `backend/core/state.py` |
+| 领域规则与触发条件 | `config/knowledge/` |
+| 精简视觉标签知识与 few-shot | `config/knowledge/visual_prompting.md` |
+| ImageJob 和最终提示词 | `backend/core/image_job.py`、`backend/services/prompt_builder.py` |
+| ComfyUI 工作流注入与传输 | `backend/services/comfyui.py`、`config/workflow_adapters/` |
+| 角色人格 | `characters/<id>/identity.md`（仅用户明确要求时修改） |
 
 ## 验证命令
 
@@ -183,4 +182,5 @@ py scripts/backend_smoke.py
 git diff --check
 ```
 
-`backend_smoke.py` 会检查本地 ComfyUI；其余探针使用临时角色、假 LLM 或假 ComfyUI，不读取和污染真实角色运行数据。修改对话、状态、生图或知识路由时必须运行对应的新旧探针。
+`backend_smoke.py` 需要本地 ComfyUI；其余探针使用临时角色、假 LLM 或假 ComfyUI，不应读取或污染真实角色数据。
+提示词拼接顺序约束：后端最终构建必须按“质量词（含 rating）→ 主体（角色标签、外貌、体型）→ 服饰 → 构图视角 → 姿势动作 → 环境与光线”排列；质量词和评级始终置于最前。

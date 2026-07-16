@@ -25,7 +25,7 @@ class AgentOutput(BaseModel):
     reply: str = Field(..., description="角色的对话回复")
     state_ops: list[dict[str, Any]] = Field(
         default_factory=list,
-        description="本轮已经完成的V2结构化状态操作，由后端Reducer提交",
+        description="旧版状态操作兼容字段；新 MomoAgent 始终留空",
     )
     image_goal: Optional[dict[str, Any]] = Field(
         None,
@@ -33,7 +33,7 @@ class AgentOutput(BaseModel):
     )
     effects: list[dict[str, Any]] = Field(
         default_factory=list,
-        description="本轮已经发生的结构化现实状态事件",
+        description="旧版结构化事件兼容字段；新 MomoAgent 始终留空",
     )
     image_intent: Optional[dict[str, Any]] = Field(
         None,
@@ -43,12 +43,25 @@ class AgentOutput(BaseModel):
         None,
         description="主 Agent识别出的长期记忆候选；由后台 MemoryAgent 二次审核",
     )
-    # Legacy fields remain readable during migration. New prompts do not ask the
-    # model to emit them; AgentRuntime converts them into the new contracts.
+    # Legacy fields remain readable for external callers. The live Momo parser
+    # ignores them; VisualContinuityAgent owns visual state in the new runtime.
     photo_prompt: Optional[str] = Field(None, description="英文 Danbooru prompt，不拍照时为 null")
     state_updates: Optional[dict] = Field(None, description="状态变更，格式: {'status': {...}}")
     immediate_memory: Optional[str] = Field(None, description="旧版长期记忆候选字段，兼容读取")
     persist_context: bool = Field(True, description="是否写入上下文和记忆")
+
+
+class ContinuityOutput(BaseModel):
+    """Visual continuity result produced after the character reply."""
+    state_patch: dict[str, Any] = Field(
+        default_factory=dict,
+        description="服饰与场景的局部完整槽位补丁",
+    )
+    shot_spec: Optional[dict[str, Any]] = Field(
+        None,
+        description="仅在 image_goal 存在时生成的动作、姿势与镜头设计",
+    )
+    reason: str = Field("", description="仅供内部诊断的连续性判断摘要")
 
 
 class ImageGenerationRequest(BaseModel):

@@ -11,13 +11,20 @@ if str(ROOT) not in sys.path:
 
 from backend.config import settings
 from backend.core.business_knowledge import route_domains
+from backend.core.context import assemble_momo_prompt
 from backend.core.image_job import build_image_job
 from backend.core.state import (
     apply_state_operations,
     apply_state_updates,
+    capture_state_snapshot,
+    merge_continuity_patch,
     state_updates_from_effects,
 )
-from backend.services.prompt_builder import build_image_prompt, normalize_camera_action_tags
+from backend.services.prompt_builder import (
+    build_image_prompt,
+    normalize_camera_action_tags,
+    normalize_prompt,
+)
 
 
 def main():
@@ -31,6 +38,9 @@ def main():
     assert "legs_together" not in focused
     assert "covering_self" not in focused
     assert "sitting_on_bed" in focused and "lying_down" not in focused
+    weighted = normalize_prompt("rating:sensitive, (close-up, foot_focus:1.1), (black hair, white shirt:0.9)")
+    assert "(close-up, foot_focus:1.1)" in weighted
+    assert "(black hair, white shirt:0.9)" in weighted
 
     original_base = settings.base_dir
     with tempfile.TemporaryDirectory() as temp:
@@ -62,6 +72,10 @@ def main():
 - calm
 """, encoding="utf-8")
 
+            momo_prompt = assemble_momo_prompt(char, "你现在穿着什么？")
+            assert "本轮开始时的客观视觉事实" in momo_prompt
+            assert "历史对话与 status.md" in momo_prompt
+
             updates = state_updates_from_effects(char, [{
                 "type": "replace_outfit",
                 "status": "completed",
@@ -84,7 +98,7 @@ def main():
                 job.dynamic_prompt,
                 state_snapshot=job.state_snapshot,
             )
-            assert "pink_pajamas" in prompt and "black_dress" not in prompt
+            assert "pink pajamas" in prompt and "black dress" not in prompt
 
             # V2 state operations preserve untouched layers and make the next
             # inner layer visible after removing the outer layer.
@@ -111,6 +125,23 @@ def main():
             assert v2_job
             assert "white_panties" in v2_job.state_snapshot["outfit_tags"]
             assert "blue_skirt" not in v2_job.state_snapshot["outfit_tags"]
+            apply_state_operations(char, [{
+                "domain": "wardrobe",
+                "operation": "remove",
+                "slot": "upper",
+                "target": "outermost",
+            }])
+            manual_prompt = build_image_prompt(char, "rating:sensitive, medium_shot")
+            assert "white panties" in manual_prompt and "topless" in manual_prompt
+            try:
+                merge_continuity_patch(capture_state_snapshot(char), {
+                    "wardrobe": {},
+                    "scene": {"mode": "replace", "tags": ["a", "b", "c", "d", "e"]},
+                })
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("scene patches must obey the four-tag budget")
             print("architecture smoke: ok")
         finally:
             settings.base_dir = original_base

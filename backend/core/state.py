@@ -14,9 +14,10 @@ from ..config import settings
 from ..utils.helpers import read_markdown, write_markdown
 from .outfit_state import normalize_outfit_markdown
 from .wardrobe import (
+    apply_wardrobe_patch,
+    derived_absence_tags,
     normalize_wardrobe,
     reduce_wardrobe,
-    wardrobe_all_tags,
     wardrobe_from_tags,
     wardrobe_visible_tags,
 )
@@ -210,7 +211,7 @@ def apply_state_operations(character: str, operations: list[dict]) -> dict:
 
     status_updates: dict[str, str] = {}
     if wardrobe_ops:
-        status_updates["穿着"] = _tags_to_markdown(wardrobe_all_tags(next_wardrobe))
+        status_updates["穿着"] = _wardrobe_to_status_markdown(next_wardrobe)
 
     for operation in operations:
         if not isinstance(operation, dict):
@@ -240,6 +241,71 @@ def apply_state_operations(character: str, operations: list[dict]) -> dict:
     return capture_state_snapshot(character)
 
 
+def merge_continuity_patch(state_snapshot: dict, state_patch: dict | None) -> dict:
+    """Validate and merge a VisualContinuityAgent patch without file writes."""
+    if state_patch is None:
+        state_patch = {}
+    if not isinstance(state_patch, dict):
+        raise ValueError("state_patch must be an object")
+    unknown = set(state_patch) - {"wardrobe", "scene"}
+    if unknown:
+        raise ValueError(f"state_patch contains unsupported fields: {', '.join(sorted(unknown))}")
+
+    previous = deepcopy(state_snapshot or {})
+    wardrobe = normalize_wardrobe(previous.get("wardrobe"))
+    next_wardrobe = apply_wardrobe_patch(wardrobe, state_patch.get("wardrobe"))
+
+    scene_tags = list(previous.get("scene_tags") or [])
+    scene_patch = state_patch.get("scene")
+    if scene_patch is not None:
+        if not isinstance(scene_patch, dict):
+            raise ValueError("scene patch must be an object or null")
+        mode = str(scene_patch.get("mode") or "replace").strip().lower()
+        if mode != "replace":
+            raise ValueError(f"unsupported scene patch mode: {mode}")
+        raw_tags = scene_patch.get("tags")
+        if not isinstance(raw_tags, list):
+            raise ValueError("scene replace patch requires a tags array")
+        scene_tags = _normalize_state_tags(raw_tags)
+        if len(scene_tags) > 4:
+            raise ValueError("scene replace patch exceeds the 4-tag budget")
+
+    return {
+        "version": int(previous.get("version") or 0),
+        "wardrobe": next_wardrobe,
+        "outfit_tags": wardrobe_visible_tags(next_wardrobe),
+        "scene_tags": scene_tags,
+    }
+
+
+def commit_continuity_patch(character: str, state_patch: dict | None) -> tuple[dict, bool]:
+    """Persist one validated continuity patch and return its frozen snapshot."""
+    previous = capture_state_snapshot(character)
+    merged = merge_continuity_patch(previous, state_patch)
+    changed = (
+        merged["wardrobe"] != previous.get("wardrobe")
+        or merged["scene_tags"] != list(previous.get("scene_tags") or [])
+    )
+    if not changed:
+        return previous, False
+
+    current_status = read_status(character)
+    status_updates = {
+        "穿着": _wardrobe_to_status_markdown(merged["wardrobe"]),
+        "场景细节": _tags_to_markdown(merged["scene_tags"]),
+    }
+    next_status = _deep_merge_markdown(character, current_status, status_updates)
+    write_status(character, next_status)
+
+    merged["version"] = int(previous.get("version") or 0) + 1
+    path = get_state_snapshot_path(character)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_suffix(".json.tmp")
+    temp_path.write_text(json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8")
+    temp_path.replace(path)
+    return deepcopy(merged), True
+
+
 def _write_state_snapshot(
     character: str,
     wardrobe: dict | None = None,
@@ -256,6 +322,15 @@ def _write_state_snapshot(
         normalized = normalize_wardrobe(wardrobe)
         snapshot["wardrobe"] = normalized
         snapshot["outfit_tags"] = wardrobe_visible_tags(normalized)
+        # Keep the Markdown file as a projection of the same canonical
+        # wardrobe. Never write the legacy flat garment tags back to it.
+        current_status = read_status(character)
+        projected = _deep_merge_markdown(
+            character,
+            current_status,
+            {"穿着": _wardrobe_to_status_markdown(normalized)},
+        )
+        write_status(character, projected)
     snapshot["version"] = int(previous.get("version") or 0) + 1
     path.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -267,14 +342,79 @@ def _read_section_tags(status: str, section: str) -> list[str]:
     result = []
     for line in match.group(1).splitlines():
         value = line.strip().removeprefix("-").strip()
+        if section == "穿着" and "：" in value:
+            _, value = value.split("：", 1)
+            value = value.split("（", 1)[0].strip()
+            if value == "无":
+                continue
+            value = value.replace("、", "\n")
+        if "\n" in value:
+            result.extend(v.strip().replace(" ", "_") for v in value.splitlines() if v.strip())
+            continue
         if value:
-            result.append(value)
+            result.append(value.replace(" ", "_"))
     return result
 
 
 def _tags_to_markdown(value) -> str:
     values = value if isinstance(value, list) else str(value).replace(",", "\n").splitlines()
     return "\n".join(f"- {str(tag).strip().removeprefix('-').strip()}" for tag in values if str(tag).strip())
+
+
+def _wardrobe_to_status_markdown(wardrobe: dict) -> str:
+    """Render the canonical layered wardrobe as a readable Markdown projection.
+
+    This deliberately avoids the legacy flat ``white``/``lace``/``panties``
+    list.  The JSON snapshot remains the machine source; this is only its
+    human/model-facing projection.
+    """
+    value = normalize_wardrobe(wardrobe)
+    absence_tags = set(derived_absence_tags(value))
+    if "completely_nude" in absence_tags:
+        accessories = []
+        for item_id in value.get("layers", {}).get("accessories", []):
+            item = value.get("items", {}).get(item_id, {})
+            phrase = " ".join(str(tag).replace("_", " ") for tag in item.get("tags", []))
+            if phrase and phrase not in accessories:
+                accessories.append(phrase)
+        lines = ["- 状态：completely_nude"]
+        if accessories:
+            lines.append(f"- 配饰：{'、'.join(accessories)}")
+        return "\n".join(lines)
+
+    lines = []
+    labels = {
+        "upper": "上身",
+        "lower": "下身",
+        "legwear": "腿部",
+        "footwear": "鞋子",
+        "accessories": "配饰",
+    }
+    for slot in ("upper", "lower", "legwear", "footwear", "accessories"):
+        phrases = []
+        for item_id in value.get("layers", {}).get(slot, []):
+            item = value.get("items", {}).get(item_id, {})
+            phrase = " ".join(str(tag).replace("_", " ") for tag in item.get("tags", []))
+            if phrase and phrase not in phrases:
+                phrases.append(phrase)
+        text = "、".join(phrases) if phrases else "无"
+        lines.append(f"- {labels[slot]}：{text}")
+    if not value.get("layers", {}).get("upper"):
+        lines[0] = "- 上身：topless"
+    if not value.get("layers", {}).get("lower"):
+        lines[1] = "- 下身：bottomless"
+    if not value.get("layers", {}).get("legwear") and not value.get("layers", {}).get("footwear"):
+        lines[3] = "- 鞋子：barefoot"
+    return "\n".join(lines)
+
+
+def _normalize_state_tags(value: list) -> list[str]:
+    result: list[str] = []
+    for raw in value:
+        tag = str(raw or "").strip().removeprefix("-").strip().lower().replace(" ", "_")
+        if tag and tag not in result:
+            result.append(tag)
+    return result
 
 
 def _deep_merge_markdown(character: str, current_text: str, updates: dict) -> str:
@@ -297,7 +437,7 @@ def _deep_merge_markdown(character: str, current_text: str, updates: dict) -> st
             continue
 
         md_content = _value_to_markdown(content)
-        if canonical == "穿着":
+        if canonical == "穿着" and "- 上身：" not in md_content:
             md_content = normalize_outfit_markdown(md_content)
 
         # 穿着防呆：dict 只有 1-2 项但旧内容有 4+ 行 → 可能是 LLM 只发了变更项，拒绝
@@ -352,7 +492,9 @@ def _coerce_outfit_tags(outfit_tags=None) -> str:
 def _default_status(character: str = "momo", outfit_tags=None) -> str:
     """默认状态"""
     char_name = _character_name(character)
-    outfit = _coerce_outfit_tags(outfit_tags)
+    outfit = _wardrobe_to_status_markdown(wardrobe_from_tags(
+        [line.removeprefix("-").strip() for line in _coerce_outfit_tags(outfit_tags).splitlines() if line.strip()]
+    ))
     return f"""# {char_name}的状态
 
 ## 穿着

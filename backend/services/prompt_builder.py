@@ -9,7 +9,7 @@ import logging
 from ..core.state import read_status, read_state_snapshot
 from ..core.characters import get_active
 from ..core.context import load_character_profile
-from ..core.wardrobe import wardrobe_visible_tags
+from ..core.wardrobe import wardrobe_visible_prompt_tags
 
 logger = logging.getLogger(__name__)
 
@@ -150,6 +150,15 @@ QUALITY_TAGS = (
     "amazing quality",
 )
 
+LOCAL_DETAIL_FOCUS = {
+    "pussy_focus",
+    "foot_focus",
+    "feet_focus",
+    "chest_focus",
+    "breast_focus",
+    "ass_focus",
+}
+
 
 
 CAMERA_ACTION_RULES = [
@@ -169,7 +178,7 @@ CAMERA_ACTION_RULES = [
         "name": "feet_focus",
         "triggers": {"feet_focus", "foot_focus"},
         "add": [
-            "feet_focus",
+            "foot_focus",
         ],
     },
     {
@@ -215,7 +224,7 @@ def parse_clothing_status(status_md: str) -> list[str]:
 
     if any(w in content for w in CHINESE_NUDE_WORDS):
         logger.warning("穿着状态含中文裸露描述，按明确 nude 处理；建议改为英文标签")
-        return ["completely_nude", "nude", "bare_body"]
+        return ["completely_nude"]
 
     lines = content.strip().split("\n")
     tags = []
@@ -239,17 +248,22 @@ def parse_clothing_status(status_md: str) -> list[str]:
 def get_clothing_tags(character: str = None) -> str:
     """获取角色的服饰标签字符串"""
     char = character or get_active()
+    structured = False
     try:
-        status_md = read_status(char)
-        tags = parse_clothing_status(status_md)
-        if not tags:
-            snapshot = read_state_snapshot(char)
-            tags = snapshot.get("outfit", {}).get("tags", [])
-    except Exception as e:
-        logger.warning(f"读取 status.md 失败，回退 state_snapshot: {e}")
         snapshot = read_state_snapshot(char)
-        tags = snapshot.get("outfit", {}).get("tags", [])
-    tags = _resolve_clothing_conflicts(tags)
+        wardrobe = snapshot.get("wardrobe")
+        if isinstance(wardrobe, dict):
+            tags = wardrobe_visible_prompt_tags(wardrobe)
+            structured = True
+        else:
+            tags = parse_clothing_status(read_status(char))
+            if not tags:
+                tags = snapshot.get("outfit", {}).get("tags", [])
+    except Exception as e:
+        logger.warning(f"读取结构化服饰状态失败，回退 status.md: {e}")
+        tags = parse_clothing_status(read_status(char))
+    if not structured:
+        tags = _resolve_clothing_conflicts(tags)
     return ", ".join(tags)
 
 
@@ -349,7 +363,7 @@ def normalize_camera_action_tags(prompt: str) -> str:
     tags = _dedupe_tags(_split_prompt_tags(prompt))
     tags = _drop_redundant_composition_tags(tags)
     tags = _drop_generic_pose_conflicts(tags)
-    normalized = {_norm_tag(t) for t in tags}
+    normalized = _semantic_norms(tags)
 
     for rule in CAMERA_ACTION_RULES:
         if rule.get("skip_if") and normalized & rule["skip_if"]:
@@ -363,9 +377,10 @@ def normalize_camera_action_tags(prompt: str) -> str:
 
         tags = [t for t in tags if _norm_tag(t) not in remove_tags]
         for tag in rule["add"]:
-            tags.append(tag)
+            if _norm_tag(tag) not in normalized:
+                tags.append(tag)
         tags = _dedupe_tags(tags)
-        normalized = {_norm_tag(t) for t in tags}
+        normalized = _semantic_norms(tags)
         logger.info(f"已应用视角/动作规则: {rule['name']}")
 
     return ", ".join(tags)
@@ -373,7 +388,7 @@ def normalize_camera_action_tags(prompt: str) -> str:
 
 def _drop_generic_pose_conflicts(tags: list[str]) -> list[str]:
     """Resolve hard limb contradictions even when no special focus is set."""
-    normalized = {_norm_tag(tag) for tag in tags}
+    normalized = _semantic_norms(tags)
     spread = {"legs_spread", "spread_legs", "spreading_legs"}
     together = {"legs_together", "knees_together"}
     if normalized & spread and normalized & together:
@@ -383,7 +398,7 @@ def _drop_generic_pose_conflicts(tags: list[str]) -> list[str]:
 
 
 def _drop_redundant_composition_tags(tags: list[str]) -> list[str]:
-    normalized = {_norm_tag(t) for t in tags}
+    normalized = _semantic_norms(tags)
     has_closeup = bool(normalized & {"close-up", "closeup"})
     if not has_closeup:
         return tags
@@ -399,7 +414,25 @@ def _drop_redundant_composition_tags(tags: list[str]) -> list[str]:
 
 
 def _split_prompt_tags(prompt: str) -> list[str]:
-    return [t.strip() for t in prompt.split(",") if t.strip()]
+    result: list[str] = []
+    current: list[str] = []
+    depth = 0
+    for char in str(prompt or ""):
+        if char in "([":
+            depth += 1
+        elif char in ")]" and depth > 0:
+            depth -= 1
+        if char == "," and depth == 0:
+            item = "".join(current).strip()
+            if item:
+                result.append(item)
+            current = []
+        else:
+            current.append(char)
+    item = "".join(current).strip()
+    if item:
+        result.append(item)
+    return result
 
 
 def _norm_tag(tag: str) -> str:
@@ -428,15 +461,20 @@ def _is_rating_tag(tag: str) -> bool:
 
 def _ensure_required_prompt_tags(prompt: str) -> str:
     tags = _dedupe_tags(_split_prompt_tags(prompt))
-    if not any(_is_rating_tag(tag) for tag in tags):
+    ratings = [tag for tag in tags if _is_rating_tag(tag)]
+    if not ratings:
         default_rating = "rating:nsfw" if _has_explicit_nudity(tags) else "rating:general"
-        tags.insert(0, default_rating)
+        ratings = [default_rating]
         logger.info("最终 prompt 缺少 rating，已补齐为 %s", default_rating)
 
     quality_norms = {_norm_tag(tag) for tag in QUALITY_TAGS}
-    tags = [tag for tag in tags if _norm_tag(tag) not in quality_norms]
-    tags.extend(QUALITY_TAGS)
-    return ", ".join(_dedupe_tags(tags))
+    body = [
+        tag for tag in tags
+        if not _is_rating_tag(tag) and _norm_tag(tag) not in quality_norms
+    ]
+    # Prompt order is intentional: earlier groups receive stronger attention
+    # from the image model. Keep quality/rating at the very front.
+    return ", ".join(_dedupe_tags(list(QUALITY_TAGS) + ratings[:1] + body))
 
 
 def _split_status_tags(raw: str) -> list[str]:
@@ -456,8 +494,25 @@ def _split_status_tags(raw: str) -> list[str]:
 
 
 def _has_explicit_nudity(tags: list[str]) -> bool:
-    normalized = {_norm_tag(t) for t in tags}
+    normalized = _semantic_norms(tags)
     return bool(normalized & EXPLICIT_NUDE_TAGS)
+
+
+def _semantic_norms(tags: list[str]) -> set[str]:
+    """Return normalized members from plain or weighted prompt groups."""
+    result: set[str] = set()
+    for raw in tags:
+        value = str(raw or "").strip()
+        if len(value) >= 2 and value[0] in "([" and value[-1] in ")]":
+            value = value[1:-1].strip()
+        members = [part.strip() for part in value.split(",") if part.strip()]
+        for index, member in enumerate(members):
+            # Group syntax places the weight after the final member.
+            if index == len(members) - 1:
+                member = re.sub(r":\s*\d+(?:\.\d+)?$", "", member).strip()
+            if member:
+                result.add(_norm_tag(member))
+    return result
 
 
 def _is_accessory_tag(tag: str) -> bool:
@@ -493,15 +548,17 @@ def _resolve_clothing_conflicts(tags: list[str]) -> list[str]:
         if norm in EXPLICIT_NUDE_TAGS or _is_accessory_tag(norm):
             result.append(tag)
     if "completely_nude" in {t.lower().replace(" ", "_") for t in result}:
-        for extra in ("nude", "bare_body"):
-            if extra not in result:
-                result.append(extra)
+        return [
+            tag for tag in result
+            if tag.lower().replace(" ", "_") == "completely_nude"
+            or _is_accessory_tag(tag.lower().replace(" ", "_"))
+        ]
     return result
 
 
 def _harmonize_rating(prompt: str) -> str:
     """裸露标签存在时，避免仍标 rating:general。"""
-    tags = [t.strip() for t in prompt.split(",") if t.strip()]
+    tags = _split_prompt_tags(prompt)
     if not _has_explicit_nudity(tags):
         return prompt
     fixed = []
@@ -534,31 +591,82 @@ def build_image_prompt(
     body_type = visual_anchor["body_tags"]
     appearance = visual_anchor["appearance_tags"]
 
-    prompt_lower = prompt.lower()
-    if "close-up" in prompt_lower or "closeup" in prompt_lower:
+    prompt_norms = _semantic_norms(_split_prompt_tags(prompt))
+    is_closeup = bool(prompt_norms & {"close-up", "closeup", "macro_shot"})
+    is_local_detail = is_closeup and bool(prompt_norms & LOCAL_DETAIL_FOCUS)
+    if is_closeup and not is_local_detail:
         body_type = ""
         appearance = ""
-    elif any(t in prompt_lower for t in ("pussy_focus", "feet_focus", "chest_focus")):
+    elif not is_local_detail and prompt_norms & LOCAL_DETAIL_FOCUS:
         body_type = ", ".join(body_type.split(",")[:2])
         appearance = ", ".join(appearance.split(",")[:2])
-    elif "face_focus" in prompt_lower:
+    elif "face_focus" in prompt_norms:
         body_type = ""
 
-    char_tags = ", ".join(p for p in [avatar_role, body_type, appearance] if p)
+    appearance_tags = ", ".join(p for p in [body_type, appearance] if p)
+    if is_local_detail and appearance_tags:
+        appearance_tags = _weighted_group(appearance_tags, 0.9)
+    char_tags = ", ".join(p for p in [avatar_role, appearance_tags] if p)
     # Background image generation must use the state committed by its own
     # conversation turn. Reading status.md here would allow a later turn to
     # silently change an earlier queued image.
     if state_snapshot is None:
         scene_tags = get_scene_tags(character)
         clothing_tags = get_clothing_tags(character)
+        if is_local_detail:
+            clothing_tags = _deemphasize_clothing_tags(_split_prompt_tags(clothing_tags))
     else:
         scene_tags = ", ".join(state_snapshot.get("scene_tags") or [])
         wardrobe = state_snapshot.get("wardrobe")
         if isinstance(wardrobe, dict):
-            clothing_tags = ", ".join(wardrobe_visible_tags(wardrobe))
+            clothing_values = wardrobe_visible_prompt_tags(wardrobe)
+            clothing_tags = (
+                _deemphasize_clothing_tags(clothing_values)
+                if is_local_detail
+                else ", ".join(clothing_values)
+            )
         else:
-            clothing_tags = ", ".join(state_snapshot.get("outfit_tags") or [])
-    parts = [p for p in [char_tags, prompt, scene_tags, clothing_tags] if p]
+            clothing_values = list(state_snapshot.get("outfit_tags") or [])
+            clothing_tags = (
+                _deemphasize_clothing_tags(clothing_values)
+                if is_local_detail
+                else ", ".join(clothing_values)
+            )
+    dynamic_tags = _split_prompt_tags(prompt)
+    view_tags: list[str] = []
+    action_tags: list[str] = []
+    lighting_tags: list[str] = []
+    for tag in dynamic_tags:
+        norm = _semantic_norms([tag])
+        raw_norm = _norm_tag(tag)
+        if raw_norm in {
+            "close-up", "closeup", "macro_shot", "medium_shot", "wide_shot",
+            "full_body", "upper_body", "cowboy_shot", "front_view", "back_view",
+            "side_view", "from_above", "from_below", "from_behind", "pov",
+            "face_focus", "pussy_focus", "foot_focus", "feet_focus",
+            "chest_focus", "breast_focus", "ass_focus",
+        } or any(token.endswith(("_view", "_angle")) for token in norm):
+            view_tags.append(tag)
+        elif "lighting" in raw_norm or raw_norm in {
+            "warm_light", "soft_diffused", "rim_light", "backlighting",
+            "natural_light", "dimly_lit",
+        }:
+            lighting_tags.append(tag)
+        else:
+            action_tags.append(tag)
+
+    # Stable semantic order: quality/rating are moved to the front by
+    # _ensure_required_prompt_tags; the remaining groups follow the visual
+    # hierarchy requested by the product contract.
+    scene_values = scene_tags.split(", ") if scene_tags else []
+    ordered_body = [
+        char_tags,
+        clothing_tags,
+        ", ".join(view_tags),
+        ", ".join(action_tags),
+        ", ".join([*scene_values, *lighting_tags]),
+    ]
+    parts = [p for p in ordered_body if p]
     final_prompt = normalize_prompt(
         normalize_camera_action_tags(
                 _harmonize_rating(", ".join(parts))
@@ -567,3 +675,29 @@ def build_image_prompt(
     final_prompt = _ensure_required_prompt_tags(final_prompt)
     logger.info(f"最终生图 prompt 已构建: character={character}, {len(final_prompt)} 字符")
     return final_prompt
+
+
+def _weighted_group(value: str, weight: float) -> str:
+    content = str(value or "").strip()
+    if not content:
+        return ""
+    rendered = f"{float(weight):.2f}".rstrip("0").rstrip(".")
+    # ComfyUI/A1111 both support explicit prompt weights in parentheses.
+    # Do not emit ``[...:0.9]``: square brackets are not a portable explicit
+    # weighting form and may be parsed as prompt editing by A1111.
+    return f"({content}:{rendered})"
+
+
+def _deemphasize_clothing_tags(tags: list[str]) -> str:
+    garments: list[str] = []
+    persistent_absence: list[str] = []
+    for tag in tags:
+        if _norm_tag(tag) in EXPLICIT_NUDE_TAGS | {"barefoot"}:
+            persistent_absence.append(tag)
+        else:
+            garments.append(tag)
+    result: list[str] = []
+    if garments:
+        result.append(_weighted_group(", ".join(garments), 0.9))
+    result.extend(persistent_absence)
+    return ", ".join(result)

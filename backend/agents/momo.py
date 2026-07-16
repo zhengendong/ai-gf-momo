@@ -1,6 +1,6 @@
 ﻿"""
 Momo Agent — 实时对话
-一次 LLM 调用完成意图判断、对话生成、状态事件和画面意图设计
+一次 LLM 调用完成角色决策、自然回复和高层图片目标
 """
 
 import json
@@ -129,8 +129,7 @@ class MomoAgent:
             output = self._parse_output(raw)
         except Exception as e:
             logger.error(f"Momo Agent 调用失败: {e}")
-            char_name = get_character_name(character)
-            output = AgentOutput(reply=f"（{char_name}走神了…等一下哦～）\n错误: {e}")
+            raise
 
         return output
 
@@ -143,7 +142,7 @@ class MomoAgent:
         output: AgentOutput,
         issues: list[str],
     ) -> AgentOutput:
-        """Repair one invalid turn outcome on the exceptional path only."""
+        """Repair only the character-facing JSON contract."""
         payload = {
             "current_user_message": user_message,
             "current_status": status,
@@ -151,7 +150,7 @@ class MomoAgent:
             "validation_issues": issues,
             "instruction": (
                 "Return one corrected complete JSON outcome. Preserve the character's decision and voice, "
-                "but make reply, completed state_ops and image_goal mutually consistent. Do not explain."
+                "and return only reply, image_goal, memory_candidate and persist_context. Do not explain."
             ),
         }
         raw = await self.llm.chat_prompt(
@@ -172,19 +171,37 @@ class MomoAgent:
             if text.startswith("`"):
                 lines = text.split("\n")
                 text = "\n".join(lines[1:-1]) if len(lines) > 2 else text
+            # Some OpenAI-compatible endpoints prepend a short explanation even
+            # when the model was instructed to return JSON only. Recover the
+            # object without accepting arbitrary prose as a role reply.
+            if not text.startswith("{"):
+                start = text.find("{")
+                end = text.rfind("}")
+                if start >= 0 and end > start:
+                    text = text[start:end + 1]
             data = json.loads(text)
+            if not isinstance(data, dict):
+                raise ValueError("Momo output must be a JSON object")
+            reply = str(data.get("reply") or "").strip()
+            if not reply:
+                raise ValueError("Momo output requires a non-empty reply")
+            image_goal = data.get("image_goal")
+            if image_goal is not None and not isinstance(image_goal, dict):
+                raise ValueError("image_goal must be an object or null")
             return AgentOutput(
-                reply=data.get("reply", ""),
-                state_ops=data.get("state_ops") or [],
-                image_goal=data.get("image_goal"),
-                effects=data.get("effects") or [],
-                image_intent=data.get("image_intent"),
+                reply=reply,
+                # State fields remain readable on AgentOutput for old API
+                # callers, but the live MomoAgent no longer owns continuity.
+                state_ops=[],
+                image_goal=image_goal,
+                effects=[],
+                image_intent=None,
                 memory_candidate=data.get("memory_candidate"),
-                photo_prompt=data.get("photo_prompt"),
-                state_updates=data.get("state_updates"),
+                photo_prompt=None,
+                state_updates=None,
                 immediate_memory=data.get("immediate_memory"),
                 persist_context=data.get("persist_context", True),
             )
         except (json.JSONDecodeError, KeyError, ValueError) as e:
             logger.warning(f"解析 Agent 输出失败: {e}, raw={raw[:200]}")
-            return AgentOutput(reply=raw.strip())
+            raise ValueError(f"invalid Momo output: {e}") from e

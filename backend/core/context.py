@@ -124,7 +124,8 @@ def assemble_momo_prompt(
         "## 1. user.json（用户信息）",
         user_profile or "（未填写）",
         "",
-        "## 2. status.md（当前现实状态）",
+        "## 2. status.md（本轮开始时的客观视觉事实）",
+        "以下状态由上一轮 VisualContinuityAgent 还原并已提交。它不是猜测、建议或可选参考；服饰和场景事实不得被历史对话、记忆或角色惯性否认。角色回复必须从此状态继续，只能通过本轮明确发生的新动作改变它。",
         status or "（未填写）",
     ]
 
@@ -149,6 +150,11 @@ def assemble_momo_prompt(
         parts.append(business_knowledge)
 
     # 用户消息
+    parts.append("## 当前视觉事实约束")
+    parts.append(
+        "生成回复前必须以 status.md 为本轮起点。若历史对话与 status.md 的任何事实冲突，"
+        "以 status.md 为准；不得否认、改写、遗漏或凭空补造其中任何当前事实。"
+    )
     parts.append("## 6. 当前用户消息")
     parts.append(f"{user_pet_name}说：{user_message}")
     parts.append("")

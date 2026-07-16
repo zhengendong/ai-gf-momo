@@ -30,6 +30,32 @@ def _latent_inputs(workflow: dict) -> dict:
     return latents[0]
 
 
+def _template_ksampler_inputs(workflow: dict) -> dict:
+    nodes = [node for node in workflow.get("nodes", []) if node.get("type") == "KSampler"]
+    if len(nodes) != 1:
+        raise AssertionError(f"Expected one template KSampler, got {len(nodes)}")
+    values = nodes[0].get("widgets_values") or []
+    has_seed_control = len(values) >= 7 and values[1] in {
+        "fixed", "increment", "decrement", "randomize",
+    }
+    indexes = (2, 3, 4, 5) if has_seed_control else (1, 2, 3, 4)
+    return dict(zip(("steps", "cfg", "sampler_name", "scheduler"), (values[index] for index in indexes)))
+
+
+def _template_latent_inputs(workflow: dict) -> dict:
+    nodes = [node for node in workflow.get("nodes", []) if node.get("type") == "EmptyLatentImage"]
+    if len(nodes) != 1:
+        raise AssertionError(f"Expected one template EmptyLatentImage, got {len(nodes)}")
+    node = nodes[0]
+    values = node.get("widgets_values") or []
+    widget_names = [
+        item["widget"]["name"]
+        for item in node.get("inputs", [])
+        if item.get("link") is None and "widget" in item
+    ]
+    return dict(zip(widget_names, values))
+
+
 def _build(service: ComfyUIService, profile):
     return service.build_workflow_from_template(
         prompt="probe",
@@ -61,15 +87,19 @@ def main():
                     "workflow": "ANIMA_workflow.json",
                 },
             }), encoding="utf-8")
-            assert load_generation_settings().workflow_dir == Path("D:/ComfyUI/ComfyUI/user/default/workflows")
-            inherited = _ksampler_inputs(_build(service, load_generation_settings()))
-            inherited_latent = _latent_inputs(_build(service, load_generation_settings()))
-            assert inherited["steps"] == 30
-            assert inherited["cfg"] == 4
-            assert inherited["sampler_name"] == "er_sde"
-            assert inherited["scheduler"] == "simple"
-            assert inherited_latent["width"] == 1024
-            assert inherited_latent["height"] == 1024
+            inherited_profile = load_generation_settings()
+            assert inherited_profile.workflow_dir == Path("D:/ComfyUI/ComfyUI/user/default/workflows")
+            template = json.loads(
+                (inherited_profile.workflow_dir / inherited_profile.workflow).read_text(encoding="utf-8")
+            )
+            template_sampler = _template_ksampler_inputs(template)
+            template_latent = _template_latent_inputs(template)
+            inherited = _ksampler_inputs(_build(service, inherited_profile))
+            inherited_latent = _latent_inputs(_build(service, inherited_profile))
+            for key in ("steps", "cfg", "sampler_name", "scheduler"):
+                assert inherited[key] == template_sampler[key]
+            for key in ("width", "height"):
+                assert inherited_latent[key] == template_latent[key]
 
             config_file.write_text(json.dumps({
                 "comfyui": {

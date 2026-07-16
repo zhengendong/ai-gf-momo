@@ -7,10 +7,8 @@ import time
 from datetime import datetime
 from typing import Protocol
 
-import httpx
-
 from ..agents.image import ImagePipeline
-from ..agents.image_director import ImageDirectorAgent
+from ..agents.image_director import VisualContinuityAgent, VisualContinuityError
 from ..agents.memory import MemoryAgent
 from ..agents.momo import MomoAgent
 from ..config import settings
@@ -33,35 +31,68 @@ from ..core.memory_policy import (
 from ..core.business_knowledge import load_relevant_knowledge
 from ..core.image_job import build_image_job
 from ..core.orchestrator import bg_tasks
-from ..core.output_monitor import (
-    check_output_consistency,
-)
 from ..core.state import (
     apply_state_operations,
     apply_state_updates,
     capture_state_snapshot,
-    state_updates_from_effects,
+    commit_continuity_patch,
 )
 from ..core.time_system import write_last_chat
 from ..models.schemas import StreamChunk
-from ..services.prompt_builder import sanitize_dynamic_photo_prompt
 
 logger = logging.getLogger(__name__)
 
 MAX_HISTORY_TURNS = 20
-DEFAULT_PHOTO_PROMPT = "rating:general, looking_at_viewer, masterpiece, best quality, amazing quality"
+VISUAL_HISTORY_MESSAGES = 16  # Eight prior user/assistant rounds.
+VISUAL_HISTORY_MESSAGE_CHARS = 800
 
 
 def _has_memory_update(value) -> bool:
     return bool(value.strip()) if isinstance(value, str) else bool(value)
 
 
-def _sanitize_photo_prompt_without_blocking(prompt: str) -> str:
-    cleaned = sanitize_dynamic_photo_prompt(prompt)
-    if cleaned:
-        return cleaned
-    logger.warning("photo_prompt became empty after sanitizing; using default non-blocking prompt.")
-    return DEFAULT_PHOTO_PROMPT
+def _clip_visual_history_content(value: str) -> str:
+    text = str(value or "").strip()
+    if len(text) <= VISUAL_HISTORY_MESSAGE_CHARS:
+        return text
+    half = (VISUAL_HISTORY_MESSAGE_CHARS - 1) // 2
+    return f"{text[:half]}…{text[-half:]}"
+
+
+def _recent_visual_dialogue(
+    character: str,
+    session_lines: list[str],
+    char_name: str,
+    user_label: str,
+) -> list[dict[str, str]]:
+    """Return at most eight prior rounds without duplicating session history."""
+    messages = [
+        {"role": str(item.get("role") or ""), "content": _clip_visual_history_content(item.get("content") or "")}
+        for item in read_chat_history(character, limit=VISUAL_HISTORY_MESSAGES)
+        if item.get("role") in {"user", "assistant"}
+        and item.get("type") in (None, "text")
+        and str(item.get("content") or "").strip()
+    ]
+
+    session_messages: list[dict[str, str]] = []
+    prefixes = (("user", f"{user_label}："), ("assistant", f"{char_name}："))
+    for raw in session_lines[-VISUAL_HISTORY_MESSAGES:]:
+        line = str(raw or "")
+        for role, prefix in prefixes:
+            if line.startswith(prefix):
+                content = _clip_visual_history_content(line[len(prefix):])
+                if content:
+                    session_messages.append({"role": role, "content": content})
+                break
+
+    max_overlap = min(len(messages), len(session_messages))
+    overlap = 0
+    for size in range(max_overlap, 0, -1):
+        if messages[-size:] == session_messages[:size]:
+            overlap = size
+            break
+    messages.extend(session_messages[overlap:])
+    return messages[-VISUAL_HISTORY_MESSAGES:]
 
 
 class ChunkSender(Protocol):
@@ -81,7 +112,9 @@ class AgentRuntime:
         self.sender = sender
         self.momo_agent = MomoAgent(llm_service)
         self.memory_agent = MemoryAgent(llm_service)
-        self.image_director = ImageDirectorAgent(llm_service)
+        self.visual_continuity_agent = VisualContinuityAgent(llm_service)
+        # Compatibility attribute for extensions that still inspect runtime.
+        self.image_director = self.visual_continuity_agent
         self.image_pipeline = ImagePipeline(comfyui_service, sender)
         self.chat_history_buffer: dict[tuple[str, str], list[str]] = {}
         self._character_locks: dict[str, asyncio.Lock] = {}
@@ -109,6 +142,7 @@ class AgentRuntime:
         char_name = get_character_name(char)
         user_label = get_user_pet_name(char) or "用户"
         buffer_key = (session_id, char)
+        stage = "context"
 
         try:
             history = self.chat_history_buffer.get(buffer_key, [])
@@ -146,6 +180,7 @@ class AgentRuntime:
                 len(chat_history or ""),
             )
 
+            stage = "momo"
             llm_started = time.perf_counter()
             output = await self.momo_agent.process(
                 character=char,
@@ -160,19 +195,6 @@ class AgentRuntime:
                 char,
                 time.perf_counter() - llm_started,
             )
-            if output.photo_prompt:
-                output.photo_prompt = _sanitize_photo_prompt_without_blocking(output.photo_prompt)
-            if output.effects and not output.state_ops and not output.state_updates:
-                output.state_updates = state_updates_from_effects(char, output.effects)
-
-            consistency_started = time.perf_counter()
-            output = await self._ensure_consistent_output(char, content, output)
-            logger.info(
-                "Runtime consistency done: character=%s elapsed=%.3fs",
-                char,
-                time.perf_counter() - consistency_started,
-            )
-
             if not output.persist_context:
                 await self.sender.send_chunk(
                     session_id,
@@ -191,25 +213,56 @@ class AgentRuntime:
                 )
                 return
 
-            wrote_runtime_state = False
-            if output.state_ops:
-                await self._async_apply_state_operations(char, output.state_ops)
-                wrote_runtime_state = True
-            elif output.state_updates:
-                await self._async_update_state(char, output.state_updates)
-                wrote_runtime_state = True
-
-            frozen_snapshot = capture_state_snapshot(char)
-            image_job = None
-            if not output.image_goal:
-                image_job = build_image_job(
-                    char,
-                    output.reply,
-                    image_intent=output.image_intent,
-                    legacy_prompt=output.photo_prompt,
-                    state_snapshot=frozen_snapshot,
+            previous_snapshot = capture_state_snapshot(char)
+            recent_visual_dialogue = _recent_visual_dialogue(
+                char,
+                history,
+                char_name,
+                user_label,
+            )
+            stage = "visual_continuity"
+            continuity_started = time.perf_counter()
+            try:
+                continuity = await self.visual_continuity_agent.resolve(
+                    character=char,
+                    user_message=content,
+                    reply=output.reply,
+                    image_goal=output.image_goal,
+                    previous_state=previous_snapshot,
+                    recent_dialogue=recent_visual_dialogue,
+                    business_knowledge=business_knowledge,
                 )
+                frozen_snapshot, wrote_runtime_state = await asyncio.to_thread(
+                    commit_continuity_patch,
+                    char,
+                    continuity.state_patch,
+                )
+            except (VisualContinuityError, TypeError, ValueError) as exc:
+                logger.error("Visual continuity failed for %s: %s", char, exc)
+                await self._send_turn_error(session_id, char, "本轮视觉状态同步失败，已取消本轮回复，请重新发送。")
+                return
+            logger.info(
+                "Runtime continuity done: character=%s elapsed=%.3fs changed=%s",
+                char,
+                time.perf_counter() - continuity_started,
+                wrote_runtime_state,
+            )
 
+            stage = "image_job"
+            shot_spec = self.visual_continuity_agent.harmonize_shot(
+                continuity.shot_spec,
+                output.image_goal,
+                frozen_snapshot,
+            )
+            image_job = build_image_job(
+                char,
+                output.reply,
+                image_intent=shot_spec,
+                state_snapshot=frozen_snapshot,
+                image_goal=output.image_goal,
+            ) if output.image_goal else None
+
+            stage = "reply_delivery"
             if wrote_runtime_state:
                 await self.push_current_state(session_id, char)
 
@@ -256,19 +309,7 @@ class AgentRuntime:
                     )
                 )
 
-            if output.image_goal:
-                bg_tasks.schedule(
-                    self._async_generate_directed_image(
-                        session_id=session_id,
-                        character=char,
-                        user_message=content,
-                        reply=output.reply,
-                        image_goal=output.image_goal,
-                        state_snapshot=frozen_snapshot,
-                        business_knowledge=business_knowledge,
-                    )
-                )
-            elif image_job:
+            if image_job:
                 bg_tasks.schedule(
                     self.image_pipeline.generate_job(session_id, image_job)
                 )
@@ -300,12 +341,24 @@ class AgentRuntime:
             )
 
         except Exception as e:
-            content = self._format_user_facing_error(char_name, e)
-            logger.error("Message handling failed for %s: %s", char, e, exc_info=True)
-            await self.sender.send_chunk(
+            logger.error(
+                "Message handling failed for %s at stage=%s: %s",
+                char,
+                stage,
+                e,
+                exc_info=True,
+            )
+            stage_messages = {
+                "context": "上下文准备失败，请重新发送。",
+                "momo": "角色回复生成失败，请重新发送。",
+                "visual_continuity": "视觉状态同步失败，请重新发送。",
+                "image_job": "图片任务准备失败，请重新发送。",
+                "reply_delivery": "本轮回复发送失败，请重新发送。",
+            }
+            await self._send_turn_error(
                 session_id,
-                StreamChunk(type="text", content=content),
-                character=char,
+                char,
+                stage_messages.get(stage, "本轮处理失败，请重新发送。"),
             )
 
     async def refresh_memory(self, session_id: str, character: str, target: str = "all"):
@@ -360,128 +413,26 @@ class AgentRuntime:
     def reload_system_prompt(self, character: str | None = None):
         self.momo_agent.reload_system_prompt(character)
 
-    async def _ensure_consistent_output(
-        self,
-        character: str,
-        user_message: str,
-        output,
-    ):
-        result = await check_output_consistency(
-            character,
-            output,
-            user_message,
+    async def _send_turn_error(self, session_id: str, character: str, message: str):
+        """Report a system failure without impersonating the role or persisting chat."""
+        await self.sender.send_chunk(
+            session_id,
+            StreamChunk(type="status_update", content=message),
+            character=character,
         )
-        if result.valid:
-            return output
-
-        logger.warning("Output consistency issue for %s: %s", character, result.issues)
-        # Repair is exceptional: normal turns still use exactly one synchronous
-        # role-model call.  The reply has not been sent and state has not been
-        # committed yet, so a corrected outcome can still be applied atomically.
-        try:
-            from ..core.state import read_status
-
-            repaired = await self.momo_agent.repair_output(
-                character=character,
-                user_message=user_message,
-                status=read_status(character),
-                output=output,
-                issues=result.issues,
-            )
-            if repaired.photo_prompt:
-                repaired.photo_prompt = _sanitize_photo_prompt_without_blocking(repaired.photo_prompt)
-            if repaired.effects and not repaired.state_ops and not repaired.state_updates:
-                repaired.state_updates = state_updates_from_effects(character, repaired.effects)
-            repaired_result = await check_output_consistency(
-                character,
-                repaired,
-                user_message,
-            )
-            if repaired_result.valid:
-                logger.info("Output consistency repair succeeded for %s", character)
-                return repaired
-            logger.warning(
-                "Output consistency repair remained invalid for %s: %s",
-                character,
-                repaired_result.issues,
-            )
-        except Exception as exc:
-            logger.warning("Output consistency repair failed for %s: %s", character, exc)
-
-        # Never preserve prose that claims an uncommitted action succeeded.
-        output.reply = "（刚才的动作没有成功完成，先保持现在的状态。）"
-        output.state_updates = None
-        output.effects = []
-        output.state_ops = []
-        output.photo_prompt = None
-        output.image_intent = None
-        output.image_goal = None
-        output.memory_candidate = None
-        output.immediate_memory = None
-        return output
-
-    async def _async_generate_directed_image(
-        self,
-        *,
-        session_id: str,
-        character: str,
-        user_message: str,
-        reply: str,
-        image_goal: dict,
-        state_snapshot: dict,
-        business_knowledge: str,
-    ):
-        """Design and generate one image from the turn's immutable snapshot."""
-        try:
-            await self.sender.send_chunk(
-                session_id,
-                StreamChunk(type="image_status", content="directing"),
-                character=character,
-            )
-            await self.sender.send_chunk(
-                session_id,
-                StreamChunk(type="status_update", content="正在设计画面..."),
-                character=character,
-            )
-            shot_spec = await self.image_director.design(
-                character=character,
-                user_message=user_message,
-                reply=reply,
-                image_goal=image_goal,
-                state_snapshot=state_snapshot,
-                business_knowledge=business_knowledge,
-            )
-            job = build_image_job(
-                character,
-                reply,
-                image_intent=shot_spec,
-                state_snapshot=state_snapshot,
-                image_goal=image_goal,
-            )
-            if not job:
-                raise ValueError("image director produced an empty shot specification")
-            await self.image_pipeline.generate_job(session_id, job)
-        except Exception as exc:
-            logger.error("Directed image generation failed for %s: %s", character, exc)
-            await self.sender.send_chunk(
-                session_id,
-                StreamChunk(type="image_status", content="error"),
-                character=character,
-            )
-            await self.sender.send_chunk(
-                session_id,
-                StreamChunk(type="status_update", content=f"图片任务失败: {exc}"),
-                character=character,
-            )
+        await self.sender.send_chunk(
+            session_id,
+            StreamChunk(type="image_status", content="error"),
+            character=character,
+        )
+        await self.sender.send_chunk(
+            session_id,
+            StreamChunk(type="done", done=True),
+            character=character,
+        )
 
     async def _async_apply_state_operations(self, character: str, operations: list[dict]):
         await asyncio.to_thread(apply_state_operations, character, operations)
-
-    def _format_user_facing_error(self, char_name: str, error: Exception) -> str:
-        if isinstance(error, httpx.HTTPStatusError):
-            body = error.response.text[:200]
-            return f"（{char_name}走神了...等一下哦）\nLLM API {error.response.status_code}: {body}"
-        return f"（{char_name}走神了...等一下哦）\n错误: {error}"
 
     async def _async_update_state(
         self,

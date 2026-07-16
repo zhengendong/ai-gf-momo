@@ -1,8 +1,8 @@
 """Deterministic layered wardrobe state and compatibility projections.
 
-The canonical wardrobe keeps a small, extensible set of layer stacks.  The
-runtime model emits completed operations; it never has to reconstruct the
-whole outfit after removing or adding one garment.
+The canonical wardrobe keeps a small, extensible set of layer stacks. The
+continuity agent emits complete replacements only for slots changed this turn;
+omitted slots retain their previous layers.
 """
 
 from __future__ import annotations
@@ -11,9 +11,10 @@ from copy import deepcopy
 from typing import Any
 
 
-WARDROBE_SCHEMA_VERSION = 1
+WARDROBE_SCHEMA_VERSION = 2
 DEFAULT_SLOTS = ("upper", "lower", "legwear", "footwear", "accessories")
 LAYERED_SLOTS = ("upper", "lower", "legwear", "footwear")
+GARMENT_CATEGORIES = ("underwear", "outerwear", "legwear", "footwear", "accessory")
 
 FULL_NUDE_TAGS = {"completely_nude", "nude", "naked", "bare_body"}
 ABSENCE_TAGS = FULL_NUDE_TAGS | {
@@ -59,6 +60,10 @@ def empty_wardrobe() -> dict[str, Any]:
         "schema_version": WARDROBE_SCHEMA_VERSION,
         "items": {},
         "layers": {slot: [] for slot in DEFAULT_SLOTS},
+        # Absence of hidden underwear is only projected after it has been
+        # explicitly established by a continuity patch. Legacy flat status
+        # files cannot prove that an omitted bra or panties are absent.
+        "known_absent": [],
         # Unknown legacy tags remain visible and suppress absence inference.
         "legacy_visible": [],
     }
@@ -72,7 +77,11 @@ def wardrobe_from_tags(tags: list[str]) -> dict[str, Any]:
 
     for raw in tags or []:
         tag = _norm_tag(raw)
-        if not tag or tag in ABSENCE_TAGS:
+        if not tag:
+            continue
+        if tag in ABSENCE_TAGS:
+            if tag not in wardrobe["known_absent"]:
+                wardrobe["known_absent"].append(tag)
             continue
         slots, rank = classify_tag(tag)
         if not slots:
@@ -83,7 +92,11 @@ def wardrobe_from_tags(tags: list[str]) -> dict[str, Any]:
         primary = slots[0]
         counters[primary] += 1
         item_id = f"{primary}_{counters[primary]}"
-        wardrobe["items"][item_id] = {"slots": slots, "tags": [tag]}
+        wardrobe["items"][item_id] = {
+            "slots": slots,
+            "tags": [tag],
+            "category": infer_category([tag], slots),
+        }
         for slot in slots:
             ranked[slot].append((rank, item_id))
 
@@ -99,17 +112,24 @@ def normalize_wardrobe(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         return empty_wardrobe()
     result = empty_wardrobe()
-    result["schema_version"] = int(value.get("schema_version") or WARDROBE_SCHEMA_VERSION)
+    result["schema_version"] = max(
+        int(value.get("schema_version") or 0),
+        WARDROBE_SCHEMA_VERSION,
+    )
 
     raw_items = value.get("items") if isinstance(value.get("items"), dict) else {}
     for raw_id, raw_item in raw_items.items():
         if not isinstance(raw_item, dict):
             continue
         item_id = str(raw_id).strip()
-        tags = _normalize_tags(raw_item.get("tags"))
+        tags = _compact_garment_tags(_normalize_tags(raw_item.get("tags")))
         slots = _normalize_slots(raw_item.get("slots"))
         if item_id and tags and slots:
-            result["items"][item_id] = {"slots": slots, "tags": tags}
+            result["items"][item_id] = {
+                "slots": slots,
+                "tags": tags,
+                "category": _normalize_category(raw_item.get("category")) or infer_category(tags, slots),
+            }
 
     raw_layers = value.get("layers") if isinstance(value.get("layers"), dict) else {}
     all_slots = list(DEFAULT_SLOTS)
@@ -138,8 +158,147 @@ def normalize_wardrobe(value: Any) -> dict[str, Any]:
             if item_id not in result["layers"][slot]:
                 result["layers"][slot].append(item_id)
 
+    result["known_absent"] = [
+        tag for tag in _normalize_tags(value.get("known_absent")) if tag in ABSENCE_TAGS
+    ]
     result["legacy_visible"] = _normalize_tags(value.get("legacy_visible"))
-    return result
+    return _reconcile_absence(result)
+
+
+def apply_wardrobe_patch(wardrobe: dict[str, Any], patch: Any) -> dict[str, Any]:
+    """Merge VisualContinuityAgent slot replacements into canonical state.
+
+    Each mentioned slot is a complete inner-to-outer layer list. Omitted slots
+    remain unchanged. The language model decides meaning; this function only
+    validates and persists its structured result.
+    """
+    result = normalize_wardrobe(deepcopy(wardrobe))
+    if patch in (None, {}):
+        return result
+    if not isinstance(patch, dict):
+        raise WardrobeOperationError("wardrobe patch must be an object")
+
+    replacements: dict[str, list[dict[str, Any]]] = {}
+    for raw_slot, raw_change in patch.items():
+        slot = _norm_slot(raw_slot)
+        if slot not in DEFAULT_SLOTS:
+            raise WardrobeOperationError(f"unknown wardrobe slot in patch: {slot or '<empty>'}")
+        if raw_change is None:
+            continue
+        if not isinstance(raw_change, dict):
+            raise WardrobeOperationError(f"wardrobe patch for {slot} must be an object or null")
+        mode = str(raw_change.get("mode") or "replace").strip().lower()
+        if mode != "replace":
+            raise WardrobeOperationError(f"unsupported wardrobe patch mode for {slot}: {mode}")
+        layers = raw_change.get("layers")
+        if not isinstance(layers, list):
+            raise WardrobeOperationError(f"wardrobe patch for {slot} requires a layers array")
+        replacements[slot] = layers
+
+    if not replacements:
+        return result
+
+    # Removing one side of a multi-slot garment removes the same item from all
+    # occupied slots before the replacement layers are installed.
+    removed_ids = {
+        item_id
+        for slot in replacements
+        for item_id in result["layers"].get(slot, [])
+    }
+    for item_id in removed_ids:
+        occupied = set(result["items"].get(item_id, {}).get("slots") or [])
+        omitted = occupied - set(replacements)
+        if omitted:
+            raise WardrobeOperationError(
+                f"multi-slot garment {item_id} also occupies omitted slots: {', '.join(sorted(omitted))}"
+            )
+    for item_id in removed_ids:
+        for layer in result["layers"].values():
+            while item_id in layer:
+                layer.remove(item_id)
+        result["items"].pop(item_id, None)
+
+    definitions: dict[str, dict[str, Any]] = {}
+    requested_order: dict[str, list[str]] = {slot: [] for slot in replacements}
+    for slot, layers in replacements.items():
+        for index, raw_garment in enumerate(layers, start=1):
+            if not isinstance(raw_garment, dict):
+                raise WardrobeOperationError(f"garment layer {slot}[{index}] must be an object")
+            tags = _compact_garment_tags(_normalize_tags(raw_garment.get("tags")))
+            slots = _normalize_slots(raw_garment.get("slots") or [slot])
+            if not tags or not slots or slot not in slots:
+                raise WardrobeOperationError(
+                    f"garment layer {slot}[{index}] requires tags and must include slot {slot}"
+                )
+            if any(item_slot not in DEFAULT_SLOTS for item_slot in slots):
+                raise WardrobeOperationError(f"garment layer {slot}[{index}] uses an unknown slot")
+            omitted_slots = set(slots) - set(replacements)
+            if omitted_slots:
+                raise WardrobeOperationError(
+                    f"multi-slot garment in {slot}[{index}] also changes omitted slots: "
+                    f"{', '.join(sorted(omitted_slots))}"
+                )
+            item_id = str(raw_garment.get("id") or raw_garment.get("item_id") or "").strip()
+            if not item_id:
+                item_id = _next_item_id_for_sets(result, definitions, slots[0])
+            definition = {
+                "slots": slots,
+                "tags": tags,
+                "category": _normalize_category(raw_garment.get("category")) or infer_category(tags, slots),
+            }
+            existing = definitions.get(item_id)
+            if existing is not None and existing != definition:
+                raise WardrobeOperationError(f"garment id has conflicting definitions: {item_id}")
+            definitions[item_id] = definition
+            if item_id not in requested_order[slot]:
+                requested_order[slot].append(item_id)
+
+    result["items"].update(definitions)
+    for slot, order in requested_order.items():
+        result["layers"][slot] = list(order)
+    for item_id, item in definitions.items():
+        for slot in item["slots"]:
+            result["layers"].setdefault(slot, [])
+            if item_id not in result["layers"][slot]:
+                result["layers"][slot].append(item_id)
+
+    # A complete replacement of upper/lower establishes hidden underwear
+    # presence or absence without creating separate top-level slots.
+    known_absent = set(result.get("known_absent") or [])
+    if "upper" in replacements:
+        if _slot_has_category(result, "upper", "underwear"):
+            known_absent.discard("no_bra")
+        else:
+            known_absent.add("no_bra")
+    if "lower" in replacements:
+        if _slot_has_category(result, "lower", "underwear"):
+            known_absent.discard("no_panties")
+        else:
+            known_absent.add("no_panties")
+    result["known_absent"] = sorted(known_absent)
+    return _reconcile_absence(normalize_wardrobe(result))
+
+
+def wardrobe_agent_view(wardrobe: dict[str, Any]) -> dict[str, Any]:
+    """Return a complete, model-readable inner-to-outer wardrobe view."""
+    value = normalize_wardrobe(wardrobe)
+    slots: dict[str, list[dict[str, Any]]] = {}
+    for slot in DEFAULT_SLOTS:
+        slots[slot] = []
+        for item_id in value["layers"].get(slot, []):
+            item = value["items"][item_id]
+            slots[slot].append({
+                "id": item_id,
+                "slots": list(item["slots"]),
+                "category": item["category"],
+                "tags": list(item["tags"]),
+            })
+    return {
+        "layer_order": "inner_to_outer",
+        "slots": slots,
+        "known_absent": list(value.get("known_absent") or []),
+        "visible_tags": wardrobe_visible_tags(value),
+    }
 
 
 def reduce_wardrobe(wardrobe: dict[str, Any], operations: list[dict]) -> dict[str, Any]:
@@ -200,11 +359,52 @@ def wardrobe_visible_tags(wardrobe: dict[str, Any]) -> list[str]:
     return result
 
 
-def derived_absence_tags(wardrobe: dict[str, Any]) -> list[str]:
-    """Derive explicit visual absence only when legacy coverage is unambiguous."""
+def wardrobe_visible_prompt_tags(wardrobe: dict[str, Any]) -> list[str]:
+    """Project visible garments as compact phrases for an image model.
+
+    State tags may stay granular for reasoning (``white``, ``lace``,
+    ``panties``), but the image prompt must keep one garment's attributes
+    together (``white lace panties``) so the generator cannot attach them to
+    different garments.
+    """
     value = normalize_wardrobe(wardrobe)
+    result: list[str] = []
+    seen_items: set[str] = set()
+    for slot in value["layers"]:
+        layer = value["layers"][slot]
+        if not layer:
+            continue
+        item_ids = layer if slot == "accessories" else [layer[-1]]
+        for item_id in item_ids:
+            if item_id in seen_items:
+                continue
+            seen_items.add(item_id)
+            tags = value["items"][item_id]["tags"]
+            phrase = " ".join(str(tag).replace("_", " ").strip() for tag in tags if str(tag).strip())
+            if phrase and phrase not in result:
+                result.append(phrase)
+    for tag in value.get("legacy_visible") or []:
+        phrase = str(tag).replace("_", " ").strip()
+        if phrase and phrase not in result:
+            result.append(phrase)
+    for tag in derived_absence_tags(value):
+        if tag not in result:
+            result.append(tag)
+    return result
+
+
+def derived_absence_tags(wardrobe: dict[str, Any]) -> list[str]:
+    """Derive the minimal non-redundant visual absence projection.
+
+    ``no_bra`` and ``no_panties`` may remain in ``known_absent`` to preserve
+    hidden-layer continuity, but are not useful image-facing tags: an empty
+    upper/lower slot already expresses that visual fact.  A fully empty body
+    is represented by one canonical tag, ``completely_nude``.
+    """
+    value = normalize_wardrobe(wardrobe)
+    known_absent = list(value.get("known_absent") or [])
     if value["legacy_visible"]:
-        return []
+        return known_absent
     layers = value["layers"]
     upper_empty = not layers.get("upper")
     lower_empty = not layers.get("lower")
@@ -212,16 +412,29 @@ def derived_absence_tags(wardrobe: dict[str, Any]) -> list[str]:
     footwear_empty = not layers.get("footwear")
 
     if upper_empty and lower_empty and legwear_empty and footwear_empty:
-        return ["completely_nude", "nude", "bare_body", "barefoot"]
+        return ["completely_nude"]
 
     result: list[str] = []
     if upper_empty:
-        result.extend(["topless", "no_bra"])
+        result.append("topless")
     if lower_empty:
-        result.extend(["bottomless", "no_panties"])
+        result.append("bottomless")
     if legwear_empty and footwear_empty:
         result.append("barefoot")
-    return result
+    return _unique(result)
+
+
+def infer_category(tags: list[str], slots: list[str]) -> str:
+    normalized = [_norm_tag(tag) for tag in tags]
+    if any(_has_hint(tag, UPPER_INNER_HINTS + LOWER_INNER_HINTS) for tag in normalized):
+        return "underwear"
+    if slots and all(slot == "accessories" for slot in slots):
+        return "accessory"
+    if slots and all(slot == "footwear" for slot in slots):
+        return "footwear"
+    if slots and all(slot == "legwear" for slot in slots):
+        return "legwear"
+    return "outerwear"
 
 
 def classify_tag(tag: str) -> tuple[list[str], int]:
@@ -285,7 +498,11 @@ def _apply_wear(wardrobe: dict[str, Any], operation: dict):
     item_id = requested_id or _next_item_id(wardrobe, slots[0])
     if item_id in wardrobe["items"]:
         raise WardrobeOperationError(f"garment id is already worn: {item_id}")
-    wardrobe["items"][item_id] = {"slots": slots, "tags": tags}
+    wardrobe["items"][item_id] = {
+        "slots": slots,
+        "tags": tags,
+        "category": _normalize_category(garment.get("category")) or infer_category(tags, slots),
+    }
     position = str(operation.get("position") or "outermost").strip().lower()
     for slot in slots:
         wardrobe["layers"].setdefault(slot, [])
@@ -333,6 +550,19 @@ def _normalize_slots(value: Any) -> list[str]:
     return result
 
 
+def _normalize_category(value: Any) -> str:
+    category = str(value or "").strip().lower().replace(" ", "_")
+    return category if category in GARMENT_CATEGORIES else ""
+
+
+def _compact_garment_tags(tags: list[str]) -> list[str]:
+    """Keep one garment's descriptors in one concise canonical phrase."""
+    values = [str(tag).strip().lower().replace(" ", "_") for tag in tags if str(tag).strip()]
+    if len(values) <= 1:
+        return values
+    return ["_".join(dict.fromkeys(values))]
+
+
 def _norm_tag(value: Any) -> str:
     return str(value or "").strip().removeprefix("-").strip().lower().replace(" ", "_")
 
@@ -357,3 +587,50 @@ def _next_item_id(wardrobe: dict[str, Any], slot: str) -> str:
     while f"{prefix}_{index}" in wardrobe["items"]:
         index += 1
     return f"{prefix}_{index}"
+
+
+def _next_item_id_for_sets(
+    wardrobe: dict[str, Any],
+    definitions: dict[str, dict[str, Any]],
+    slot: str,
+) -> str:
+    prefix = _norm_slot(slot) or "garment"
+    index = 1
+    while f"{prefix}_{index}" in wardrobe["items"] or f"{prefix}_{index}" in definitions:
+        index += 1
+    return f"{prefix}_{index}"
+
+
+def _slot_has_category(wardrobe: dict[str, Any], slot: str, category: str) -> bool:
+    return any(
+        wardrobe["items"].get(item_id, {}).get("category") == category
+        for item_id in wardrobe["layers"].get(slot, [])
+    )
+
+
+def _reconcile_absence(wardrobe: dict[str, Any]) -> dict[str, Any]:
+    """Drop explicit absence markers contradicted by canonical garments."""
+    known = set(wardrobe.get("known_absent") or [])
+    layers = wardrobe.get("layers") or {}
+    if _slot_has_category(wardrobe, "upper", "underwear"):
+        known.discard("no_bra")
+    if _slot_has_category(wardrobe, "lower", "underwear"):
+        known.discard("no_panties")
+    if layers.get("upper"):
+        known.discard("topless")
+    if layers.get("lower"):
+        known.discard("bottomless")
+    if layers.get("legwear") or layers.get("footwear"):
+        known.discard("barefoot")
+    if any(layers.get(slot) for slot in LAYERED_SLOTS):
+        known.difference_update(FULL_NUDE_TAGS)
+    wardrobe["known_absent"] = sorted(tag for tag in known if tag in ABSENCE_TAGS)
+    return wardrobe
+
+
+def _unique(values: list[str]) -> list[str]:
+    result: list[str] = []
+    for value in values:
+        if value and value not in result:
+            result.append(value)
+    return result
