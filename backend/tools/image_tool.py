@@ -59,6 +59,7 @@ class ImageTool:
             job.dynamic_prompt,
             reply=job.reply,
             state_snapshot=job.state_snapshot,
+            shot_spec=job.shot_spec,
         )
         profile = load_generation_settings()
         workflow = self.comfyui.build_workflow_from_template(

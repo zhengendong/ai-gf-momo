@@ -59,17 +59,20 @@ async def main():
                     },
                     "shot_spec": {
                         "reason": "清楚展示已完成的变化",
+                        "role_tags": ["1girl", "solo"],
+                        "appearance_tags": [],
+                        "wardrobe_tags": ["white thighhighs"],
+                        "scene_tags": ["bedroom"],
                         "action_tags": ["showing_feet"],
                         "pose": ["sitting_on_bed"],
                         "expression": ["looking_at_viewer"],
                         "camera": {
-                            "shot": "close-up",
+                            "shot": None,
                             "angle": "front_view",
                             "focus": "foot_focus",
                             "pov": False,
                         },
                         "lighting": ["warm_lighting"],
-                        "emphasis": {"tags": ["foot_focus"], "weight": 1.1},
                         "rating": "general",
                     },
                 },
@@ -86,6 +89,10 @@ async def main():
             assert wardrobe["layers"]["legwear"]
             assert "black_mary_jane_shoes" not in read_status(CHARACTER)
             assert len(llm.calls) == 2, "one role call plus one always-on continuity call"
+            director_payload = json.loads(llm.calls[1]["user"])
+            assert director_payload["prompt_inputs"]["role_tags"] == ["1girl", "solo"]
+            assert director_payload["prompt_inputs"]["body_tags"] == ["petite"]
+            assert director_payload["prompt_inputs"]["appearance_tags"] == ["black_hair", "brown_eyes"]
 
             statuses = [chunk.content for chunk in sender.chunks if chunk.type == "image_status"]
             assert "generating" in statuses
@@ -97,9 +104,10 @@ async def main():
             assert "black_mary_jane_shoes" not in prompt
             assert "white thighhighs" in prompt
             assert "barefoot" not in prompt
-            assert "(foot_focus:1.1)" in prompt
-            assert "(petite, black_hair, brown_eyes:0.9)" in prompt
-            assert "(white shirt, black pleated skirt, white thighhighs:0.9)" in prompt
+            assert "white shirt" not in prompt and "black pleated skirt" not in prompt
+            assert "petite" not in prompt and "black hair" not in prompt
+            assert ":0.9" not in prompt and ":1.1" not in prompt
+            assert len([tag for tag in prompt.split(",") if tag.strip()]) <= 25
 
             refusal_llm = FakeLLM([
                 {

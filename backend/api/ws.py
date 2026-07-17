@@ -130,6 +130,26 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                         character=character,
                     )
 
+            elif msg_type == "initial_scene":
+                character = (
+                    message_data.get("character_id")
+                    or message_data.get("character")
+                    or get_active()
+                )
+                try:
+                    await runtime.handle_initial_scene(session_id, character)
+                except ValueError as e:
+                    await manager.send_chunk(
+                        session_id,
+                        StreamChunk(type="status_update", content=str(e)),
+                        character=character,
+                    )
+                    await manager.send_chunk(
+                        session_id,
+                        StreamChunk(type="done", content=""),
+                        character=character,
+                    )
+
             else:
                 logger.warning("Unknown websocket message type: %s", msg_type)
 

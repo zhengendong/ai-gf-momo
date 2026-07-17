@@ -276,8 +276,9 @@ def chat_messages_for_days(character: str, days: int) -> str:
         if not content:
             continue
         role = "用户" if msg.get("role") == "user" else "角色"
-        stamp = ts.astimezone().strftime("%Y-%m-%d %H:%M") if ts else ""
-        lines.append(f"### {stamp} {role}\n{content}")
+        # Technical timestamps are used only to select a bounded recent
+        # window. They must never be exposed to MemoryAgent as story facts.
+        lines.append(f"### {role}\n{content}")
     return "\n\n".join(lines)
 
 

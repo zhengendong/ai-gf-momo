@@ -20,9 +20,28 @@ from backend.core.wardrobe import (
     wardrobe_visible_prompt_tags,
     WardrobeOperationError,
 )
+from backend.core.state import _read_section_tags
 
 
 def main():
+    corrupted_projection = """# 测试状态
+## 穿着
+- 上身：上身：light blue pajamas、下身：light blue pajamas
+- 下身：上身：上身：light blue pajamas、下身：light blue pajamas
+- 腿部：无
+- 鞋子：barefoot
+- 配饰：配饰：silver heart necklace、black bell collar
+
+## 场景细节
+- bedroom
+"""
+    assert _read_section_tags(corrupted_projection, "穿着") == [
+        "light_blue_pajamas",
+        "barefoot",
+        "silver_heart_necklace",
+        "black_bell_collar",
+    ]
+
     wardrobe = wardrobe_from_tags([
         "white_bra",
         "white_blouse",

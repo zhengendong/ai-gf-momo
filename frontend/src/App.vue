@@ -19,18 +19,26 @@
         :is-connected="isConnected"
         :character-name="profile.name"
         :character-avatar="profile.avatar"
+        :regenerating-image-url="regeneratingImageUrl"
+        :regeneration-error="regenerationError"
         @send="onSendMessage"
+        @regenerate="onRegenerateImage"
       />
       <div class="right-side">
         <StatePanel :character-state="characterState" />
         <SceneTransitionPanel
           :disabled="!isConnected || isLoading"
+          :character-id="activeCharId"
+          :initialized="characterState?.initialized"
           @transition="onSceneTransition"
+          @initialize="onInitialScene"
+          @saved="onInitialSceneSaved"
         />
         <ImageGallery
           :character-name="profile.name"
           :active-char-id="activeCharId"
           :image-status="imageStatus"
+          :refresh-token="imageHistoryRefreshToken"
         />
       </div>
     </div>
@@ -39,7 +47,7 @@
 </template>
 
 <script setup>
-import { ref, watch, onMounted } from 'vue'
+import { ref, watch, onMounted, onUnmounted } from 'vue'
 import { useWebSocket } from './composables/useWebSocket'
 import { useCharacter } from './composables/useCharacter.js'
 import ChatArea from './components/ChatArea.vue'
@@ -56,12 +64,17 @@ const {
   sendMessage, refreshMemory, syncCharacter, loadHistory,
 } = useWebSocket()
 
-const { profile, characters, activeCharId, loadAll, switchCharacter } = useCharacter()
+const { profile, characters, activeCharId, loadAll, loadProfile, switchCharacter } = useCharacter()
 
 onMounted(async () => {
   await loadAll()
   await loadHistory(activeCharId.value)
   syncCharacter(activeCharId.value)
+  window.addEventListener('character-records-cleared', onCharacterRecordsCleared)
+})
+
+onUnmounted(() => {
+  window.removeEventListener('character-records-cleared', onCharacterRecordsCleared)
 })
 
 watch(() => profile.name, (name) => {
@@ -73,6 +86,9 @@ watch(isConnected, (connected) => {
 })
 
 const isLoading = ref(false)
+const regeneratingImageUrl = ref('')
+const regenerationError = ref(null)
+const imageHistoryRefreshToken = ref(0)
 
 watch(lastMessage, (msg) => {
   if (msg) isLoading.value = false
@@ -89,9 +105,61 @@ const onSendMessage = (text) => {
     id: Date.now(),
     role: 'user',
     content: text,
-    timestamp: new Date()
+    timestamp: new Date(),
+    pendingInitial: characterState.value?.initialized === false,
   })
   sendMessage({ type: 'text', character_id: characterId, content: text })
+}
+
+const onInitialScene = () => {
+  if (!isConnected.value || isLoading.value) return
+  isLoading.value = true
+  sendMessage({
+    type: 'initial_scene',
+    character_id: activeCharId.value,
+  })
+}
+
+const onInitialSceneSaved = async () => {
+  if (activeCharId.value) await loadProfile(activeCharId.value)
+}
+
+const onRegenerateImage = async (imageUrl) => {
+  if (!imageUrl || regeneratingImageUrl.value) return
+  regenerationError.value = null
+  regeneratingImageUrl.value = imageUrl
+  try {
+    const response = await fetch('/api/image/regenerate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ image_url: imageUrl, character: activeCharId.value }),
+    })
+    const result = await response.json().catch(() => ({}))
+    if (!response.ok || !result.image_url) {
+      throw new Error(result.detail || '重新生成失败')
+    }
+    for (const message of messages.value) {
+      if ((message.imageUrl || message.image_url) === imageUrl) {
+        message.imageUrl = result.image_url
+        delete message.image_url
+      }
+    }
+    imageHistoryRefreshToken.value += 1
+    statusUpdate.value = '图片已重新生成 ✓'
+  } catch (error) {
+    const message = error.message || '请稍后重试'
+    regenerationError.value = { imageUrl, message }
+    statusUpdate.value = `重新生成失败：${message}`
+  } finally {
+    regeneratingImageUrl.value = ''
+  }
+}
+
+async function onCharacterRecordsCleared(event) {
+  if (event.detail?.character !== activeCharId.value) return
+  isLoading.value = false
+  await loadHistory(activeCharId.value)
+  syncCharacter(activeCharId.value)
 }
 
 const onSceneTransition = ({ mode, concept }) => {

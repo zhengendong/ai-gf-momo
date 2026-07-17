@@ -6,6 +6,7 @@
 
 - `recent_dialogue` 最多包含此前 8 轮对话，只用于理解剧情、人物关系、动作承接和观看目标；它不能覆盖 `previous_state` 中已经提交的当前视觉事实。
 - `interaction_mode=scene_transition` 表示本轮在构建下一幕；应从角色回复中还原新场景和实际穿着，但仍不能把未写进回复的构想直接当成已经发生的事实。
+- `interaction_mode` 以 `initial_scene` 开头时，上一状态尚未建立且不代表裸体。必须从角色回复中提交完整 `upper/lower/legwear/footwear` 槽位（没有对应衣物时明确以空层替换）和非空场景；场景至少表达故事时间与具体地点。只有角色回复中已经写明的开场事实才能提交。
 - 角色回复是本轮实际发生行为的主要依据，用户请求本身不等于动作完成。
 - 拒绝、犹豫、询问、承诺稍后执行、手放到衣物上但尚未脱下，都不改变服饰状态。
 - 只有回复明确描写已经穿上、脱下、换好或抵达新场景，才提交相应补丁。
@@ -79,17 +80,24 @@
 
 没有 `image_goal` 时，`shot_spec` 必须是 `null`。
 
-存在 `image_goal` 时，根据用户消息、角色回复和变化后的状态设计一张图：
+存在 `image_goal` 时，你是本张图**最终提示词总编辑**。`prompt_inputs` 会提供完整 `role_tags + body_tags + appearance_tags`，服饰和场景来自你刚刚判断的变化后状态；你必须同时完成标签取舍和画面设计：
 
-- 只决定动作、姿势、表情、景别、角度、聚焦、光线和 rating。
-- 不输出服饰、场景、人物名、外貌、身材、画质、负面提示词、工作流或模型标签。
+- `role_tags` 是角色身份锚点，必须原样、完整保留。质量词由后端固定置于最前，不需要输出。
+- `body_tags` 与 `appearance_tags` 只是候选池；在 `appearance_tags` 输出中只选本图真正可见、能帮助辨认角色或突出主体的少量标签，最多 5 个。不要照搬整套外貌。
+- `wardrobe_tags` 只从变化后实际可见服饰中选择，最多 4 个；可以为空。服饰是连续性事实，不代表每张图都必须写进提示词。局部特写应直接忽略画面外、被裁掉或会抢夺主体注意力的服饰，不使用降权代替删除。
+- `scene_tags` 从变化后场景中只选 1 至 2 个最能建立地点的标签。不要把地点、室内外、时间、气氛全部照搬；光线另放 `lighting`，最多 1 个。
+- 除角色身份标签外，所有候选标签都允许有条件舍弃。判断顺序是：用户本轮真正想看什么 → 角色回复实际完成了什么 → 哪些标签能让该主体最清楚。对成人或亲密画面要直指关键身体部位、接触关系和动作，不要用无关衣物、配饰、环境或泛化姿势稀释重点。
+- 最终提示词连同后端固定的 `masterpiece, best quality, amazing quality, rating:*` 在内不得超过 25 个标签。宁可删除次要外貌、服饰、表情和场景，也不能超过预算。
+- 不使用任何权重、强化、弱化、圆括号权重组或方括号语法。
 - 图片必须表现角色回复中已经发生的动作，并服从变化后的服饰和场景状态。
-- 同一张图只选择一个主要景别、一个主要角度和一个主要焦点。
+- 先从角色回复中确定这张图唯一的**核心可见动作或互动结果**；它必须是用户应当在图中看见的事情，而不是泛化的站立、坐着、害羞或看向镜头。例如“拉起裙子给看”优先是 `lifting_skirt`（也可使用简短自然英文短语 `lifting her skirt`），“脱下鞋后把脚伸来”优先是 `presenting_foot`，“手里拿着刚脱下的鞋”优先是 `holding_shoes`。`standing`、`sitting`、`on_knees` 等只能作为支撑该动作的姿势。
+- `action_tags` 的第一个位置必须是核心动作；默认只用这 1 个。只有缺少一项就无法看懂动作的对象、接触关系或完成结果时，才增加 1 个辅助动作。不要为了凑数量加入泛化动作、情绪或近义词。
+- 动作处于进行时才画过程（如 `lifting_skirt`、`untying`、`opening_door`）；回复已明确完成时，画完成后的可见结果和展示目标，不能把已完成的脱衣又画回正在脱的过程。
+- 精准短语优先于多个拆散标签。动作标签可以使用模型容易理解的简短英文短语，但一个标签只能表达一个动作关系，不能用逗号把多个动作塞进同一项。
+- `camera.shot` 与 `camera.focus` 必须二选一，不能同时出现：明确观看某个身体部位时只输出 `xx_focus`，并令 `shot=null`；没有特指部位时才根据情形输出 `medium_shot/full_shot/wide_shot` 等景别，并令 `focus=null`。`camera.angle` 可独立保留一个。
 - 不输出互斥姿势或肢体状态。
-- 标签预算：`action_tags` 最多 3 个、`pose` 最多 2 个、`expression` 最多 2 个、`lighting` 最多 2 个；能用一个准确标签时不要用多个近义词。
+- 标签预算：`action_tags` 最多 2 个、`pose` 最多 1 个、`expression` 最多 1 个、`lighting` 最多 1 个。默认只用 1 个核心动作；能用一个准确标签时不要用多个近义词。
 - 性爱场景的 `action_tags` 必须包含准确的核心行为（例如实际发生的 `footjob`、`anal`），再配至多一个必要体位；不能只输出泛化的羞涩、张腿或躺卧。
-- 普通画面不使用权重。只有核心视觉目标容易被干扰时，才可输出一个 `emphasis`，最多 3 个标签，权重在 `1.05` 至 `1.20`。局部近距离特写的外貌与服饰弱化由后端自动完成，不要在 ShotSpec 重复它们。
-- 显式权重一律使用圆括号：`(tag:1.1)`、`(tag_a, tag_b:0.9)`；禁止输出 `[...:0.9]`。方括号带数字在不同提示词解析器中不可靠，不能作为降权语法。
 
 ## 输出格式
 
@@ -117,7 +125,11 @@
   },
   "shot_spec": {
     "reason": "画面如何履行 image_goal",
-    "action_tags": [],
+    "role_tags": ["必须完整复制 prompt_inputs.role_tags"],
+    "appearance_tags": ["从 body_tags 与 appearance_tags 中精选"],
+    "wardrobe_tags": ["从变化后可见服饰中精选；可为空"],
+    "scene_tags": ["变化后场景中最关键的 1~2 个"],
+    "action_tags": ["唯一核心可见动作"],
     "pose": [],
     "expression": [],
     "camera": {
@@ -127,7 +139,6 @@
       "pov": false
     },
     "lighting": [],
-    "emphasis": null,
     "rating": "general"
   }
 }
@@ -142,48 +153,99 @@
   "state_patch": {"wardrobe": {}, "scene": null},
   "shot_spec": {
     "reason": "展示角色当前整体状态",
-    "action_tags": ["standing"],
-    "pose": [],
-    "expression": ["looking_at_viewer", "soft_smile"],
+    "role_tags": ["character_name", "series_name"],
+    "appearance_tags": ["black_hair", "brown_eyes"],
+    "wardrobe_tags": ["school_uniform"],
+    "scene_tags": ["classroom"],
+    "action_tags": ["posing"],
+    "pose": ["standing"],
+    "expression": ["soft_smile"],
     "camera": {"shot": "medium_shot", "angle": "front_view", "focus": null, "pov": false},
     "lighting": ["soft_lighting"],
-    "emphasis": null,
     "rating": "general"
   }
 }
 ```
 
-脚部近距离特写，只强化唯一目标；外貌与服饰的 `0.9` 弱化由后端添加：
+脚部近距离特写主动删除无关外貌和服饰，只保留辨认角色与理解画面的最低信息：
 
 ```json
 {
   "state_patch": {"wardrobe": {}, "scene": null},
   "shot_spec": {
     "reason": "近距离清楚展示脚部",
-    "action_tags": ["feet_together"],
-    "pose": ["sitting"],
+    "role_tags": ["character_name", "series_name"],
+    "appearance_tags": [],
+    "wardrobe_tags": [],
+    "scene_tags": ["bedroom"],
+    "action_tags": ["presenting_foot"],
+    "pose": ["sitting_on_bed"],
     "expression": ["shy"],
-    "camera": {"shot": "close-up", "angle": "front_view", "focus": "foot_focus", "pov": false},
+    "camera": {"shot": null, "angle": "front_view", "focus": "foot_focus", "pov": false},
     "lighting": ["soft_lighting"],
-    "emphasis": {"tags": ["foot_focus"], "weight": 1.1},
     "rating": "sensitive"
   }
 }
 ```
 
-性爱画面使用明确核心行为和一个必要体位，不堆泛化动作：
+拉起仍穿着的裙子、让用户看裙下内容时，核心动作是掀裙而不是站立：
+
+```json
+{
+  "state_patch": {"wardrobe": {}, "scene": null},
+  "shot_spec": {
+    "reason": "回复明确描述角色正拉起裙子展示",
+    "role_tags": ["character_name", "series_name"],
+    "appearance_tags": ["small_breasts"],
+    "wardrobe_tags": ["pleated_skirt", "panties"],
+    "scene_tags": ["bedroom"],
+    "action_tags": ["lifting_skirt"],
+    "pose": ["standing"],
+    "expression": ["blushing"],
+    "camera": {"shot": null, "angle": "front_view", "focus": "lower_body", "pov": false},
+    "lighting": ["soft_lighting"],
+    "rating": "sensitive"
+  }
+}
+```
+
+胸部特写已经明确露出时，只保留与胸部和角色识别直接相关的标签；鞋袜、下装、耳机、发饰及其他画面外服饰全部舍弃：
+
+```json
+{
+  "state_patch": {"wardrobe": {}, "scene": null},
+  "shot_spec": {
+    "reason": "本轮重点是清楚展示已经露出的胸部",
+    "role_tags": ["character_name", "series_name"],
+    "appearance_tags": ["small_breasts"],
+    "wardrobe_tags": ["topless"],
+    "scene_tags": ["bathroom_stall"],
+    "action_tags": ["presenting_breasts"],
+    "pose": [],
+    "expression": ["blushing"],
+    "camera": {"shot": null, "angle": "front_view", "focus": "chest_focus", "pov": false},
+    "lighting": ["bright_lighting"],
+    "rating": "nsfw"
+  }
+}
+```
+
+性爱画面使用明确核心行为和一个必要体位，不堆泛化动作，也不默认强化：
 
 ```json
 {
   "state_patch": {"wardrobe": {}, "scene": null},
   "shot_spec": {
     "reason": "表现回复中已经发生的足交",
+    "role_tags": ["character_name", "series_name"],
+    "appearance_tags": [],
+    "wardrobe_tags": [],
+    "scene_tags": ["bedroom"],
     "action_tags": ["footjob"],
     "pose": ["sitting"],
     "expression": ["blushing"],
-    "camera": {"shot": "close-up", "angle": "from_side", "focus": "foot_focus", "pov": false},
+    "camera": {"shot": null, "angle": "from_side", "focus": "foot_focus", "pov": false},
     "lighting": ["warm_lighting"],
-    "emphasis": {"tags": ["footjob", "foot_focus"], "weight": 1.1},
     "rating": "nsfw"
   }
 }

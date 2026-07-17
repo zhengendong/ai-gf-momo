@@ -67,6 +67,26 @@ def append_chat_message(character: str, message: dict):
     write_chat_history(character, messages)
 
 
+def replace_chat_image_url(character: str, old_url: str, new_url: str) -> int:
+    """Replace a generated image reference without creating a new chat turn."""
+    old_url = str(old_url or "").strip()
+    new_url = str(new_url or "").strip()
+    if not old_url or not new_url:
+        return 0
+    messages = read_chat_history(character)
+    replaced = 0
+    for message in messages:
+        current_url = message.get("imageUrl") or message.get("image_url")
+        if current_url != old_url:
+            continue
+        message["imageUrl"] = new_url
+        message.pop("image_url", None)
+        replaced += 1
+    if replaced:
+        write_chat_history(character, messages)
+    return replaced
+
+
 def append_chat_pair(character: str, user_text: str, assistant_text: str):
     append_chat_message(character, {
         "role": "user",
@@ -89,6 +109,34 @@ def append_scene_transition(character: str, assistant_text: str, label: str = "�
         "type": "scene_divider",
         "content": label,
     }))
+    messages.append(normalize_message({
+        "role": "assistant",
+        "type": "text",
+        "content": strip_photo_prompt_block(assistant_text),
+        "completed": True,
+    }))
+    write_chat_history(character, messages)
+
+
+def append_initial_scene(
+    character: str,
+    assistant_text: str,
+    user_text: str = "",
+    label: str = "故事开始",
+):
+    """Persist an opening boundary, optional first user line, and opening reply."""
+    messages = read_chat_history(character)
+    messages.append(normalize_message({
+        "role": "system",
+        "type": "scene_divider",
+        "content": label,
+    }))
+    if str(user_text or "").strip():
+        messages.append(normalize_message({
+            "role": "user",
+            "type": "text",
+            "content": str(user_text).strip(),
+        }))
     messages.append(normalize_message({
         "role": "assistant",
         "type": "text",

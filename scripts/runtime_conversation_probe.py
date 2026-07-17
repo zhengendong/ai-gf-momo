@@ -16,10 +16,11 @@ if str(ROOT) not in sys.path:
 
 from backend.config import settings
 from backend.core.chat_history import read_chat_history
+from backend.core.characters import get_profile, reset_character_memory, update_profile
 from backend.core.context import load_conversation_summary
 from backend.core.orchestrator import bg_tasks
 from backend.core.runtime import AgentRuntime
-from backend.core.state import read_status
+from backend.core.state import is_state_initialized, read_status, write_uninitialized_state
 from backend.models.schemas import StreamChunk
 
 CHARACTER = "probe"
@@ -133,6 +134,34 @@ def no_change(reason: str = "无视觉状态变化。") -> dict:
     return {
         "reason": reason,
         "state_patch": {"wardrobe": {}, "scene": None},
+        "shot_spec": None,
+    }
+
+
+def initial_state_patch() -> dict:
+    return {
+        "reason": "开场已明确建立时间、地点和完整穿着。",
+        "state_patch": {
+            "wardrobe": {
+                "upper": {"mode": "replace", "layers": [{
+                    "id": "cardigan_1", "slots": ["upper"],
+                    "category": "outerwear", "tags": ["cream_knit_cardigan"],
+                }]},
+                "lower": {"mode": "replace", "layers": [{
+                    "id": "long_skirt_1", "slots": ["lower"],
+                    "category": "outerwear", "tags": ["brown_long_skirt"],
+                }]},
+                "legwear": {"mode": "replace", "layers": [{
+                    "id": "ankle_socks_1", "slots": ["legwear"],
+                    "category": "legwear", "tags": ["white_ankle_socks"],
+                }]},
+                "footwear": {"mode": "replace", "layers": [{
+                    "id": "canvas_shoes_1", "slots": ["footwear"],
+                    "category": "footwear", "tags": ["beige_canvas_shoes"],
+                }]},
+            },
+            "scene": {"mode": "replace", "tags": ["bookstore", "rainy_afternoon"]},
+        },
         "shot_spec": None,
     }
 
@@ -255,6 +284,94 @@ async def run_scene_transition_case():
     }
 
 
+async def run_initial_scene_case():
+    write_uninitialized_state(CHARACTER)
+    update_profile(CHARACTER, {
+        "initial_scene": {
+            "concept": "雨日下午在旧书店初次见面，她穿适合逛书店的日常服装。",
+            "opening_mode": "character_first",
+        }
+    })
+    sender = CapturingSender()
+    llm = FakeLLM([
+        {
+            "reply": "雨声落在旧书店的玻璃窗上。她穿着米色针织开衫和棕色长裙，抱着书朝你笑了笑：‘你也喜欢这本吗？’",
+            "image_goal": None,
+            "memory_candidate": None,
+            "persist_context": True,
+        },
+        initial_state_patch(),
+    ])
+    runtime = AgentRuntime(llm, FakeComfy(), sender)
+    await runtime.handle_initial_scene("initial_session", CHARACTER)
+    if bg_tasks.active_count:
+        await asyncio.gather(*list(bg_tasks._tasks), return_exceptions=True)
+
+    history = read_chat_history(CHARACTER)
+    chunk_types = [chunk.type for chunk in sender.chunks]
+    assert is_state_initialized(CHARACTER)
+    assert [item["type"] for item in history] == ["scene_divider", "text"]
+    assert chunk_types.index("state_update") < chunk_types.index("scene_divider") < chunk_types.index("text")
+    assert "初始场景事实构想" in llm.calls[0]["user"]
+    assert "不要机械复刻" in llm.calls[0]["user"]
+    assert all("玩家保存的初始场景" not in item.get("content", "") for item in history)
+    return {
+        "case": "initial_scene_character_first",
+        "checks": {
+            "initialized": True,
+            "history_types": [item["type"] for item in history],
+            "chunk_type_order": chunk_types,
+            "template_is_hidden": True,
+        },
+    }
+
+
+async def run_initial_scene_with_first_message_case():
+    update_profile(CHARACTER, {
+        "initial_scene": {
+            "concept": "雨日下午在旧书店初次见面。",
+            "opening_mode": "player_first",
+        }
+    })
+    saved = get_profile(CHARACTER)["initial_scene"]
+    reset_character_memory(CHARACTER)
+    assert not is_state_initialized(CHARACTER)
+    assert get_profile(CHARACTER)["initial_scene"] == saved
+
+    sender = CapturingSender()
+    llm = FakeLLM([
+        {
+            "reply": "雨日下午，旧书店里很安静。她穿着米色针织开衫和棕色长裙，从书架后抬起头：‘你好。’",
+            "image_goal": None,
+            "memory_candidate": None,
+            "persist_context": True,
+        },
+        initial_state_patch(),
+    ])
+    runtime = AgentRuntime(llm, FakeComfy(), sender)
+    await runtime.handle_message("initial_user_session", CHARACTER, "你好，请问这本书放在哪里？")
+    if bg_tasks.active_count:
+        await asyncio.gather(*list(bg_tasks._tasks), return_exceptions=True)
+
+    history = read_chat_history(CHARACTER)
+    assert is_state_initialized(CHARACTER)
+    assert [item["type"] for item in history] == ["scene_divider", "text", "text"]
+    assert [item["role"] for item in history] == ["system", "user", "assistant"]
+    assert history[1]["content"] == "你好，请问这本书放在哪里？"
+    assert "玩家第一条消息：你好，请问这本书放在哪里？" in llm.calls[0]["user"]
+    assert all("根据角色身份" not in item.get("content", "") for item in history)
+    return {
+        "case": "initial_scene_with_first_message",
+        "checks": {
+            "template_survives_reset": True,
+            "initialized": True,
+            "history_types": [item["type"] for item in history],
+            "history_roles": [item["role"] for item in history],
+            "first_message_persisted_verbatim": True,
+        },
+    }
+
+
 async def main():
     with tempfile.TemporaryDirectory(prefix="ai_gf_probe_") as tmp:
         root = Path(tmp)
@@ -284,8 +401,13 @@ async def main():
                     "scene": None,
                 },
                 "shot_spec": {
-                    "reason": "展示换装结果", "action_tags": ["standing"], "pose": [],
-                    "expression": ["smile", "looking_at_viewer"],
+                    "reason": "展示换装结果",
+                    "role_tags": ["1girl", "solo"],
+                    "appearance_tags": ["black_hair", "brown_eyes"],
+                    "wardrobe_tags": ["black tank top", "black short shorts"],
+                    "scene_tags": ["bedroom"],
+                    "action_tags": ["showing_outfit"], "pose": ["standing"],
+                    "expression": ["smile"],
                     "camera": {"shot": "full_body", "angle": "front_view", "focus": None, "pov": False},
                     "lighting": [], "rating": "general",
                 },
@@ -343,6 +465,12 @@ async def main():
 
         setup_temp_app(root)
         results.append(await run_scene_transition_case())
+
+        setup_temp_app(root)
+        results.append(await run_initial_scene_case())
+
+        setup_temp_app(root)
+        results.append(await run_initial_scene_with_first_message_case())
 
         print(json.dumps(results, ensure_ascii=False, indent=2))
 

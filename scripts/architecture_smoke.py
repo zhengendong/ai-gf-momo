@@ -10,8 +10,10 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from backend.config import settings
+from backend.agents.image_director import _parse_shot
 from backend.core.business_knowledge import route_domains
 from backend.core.context import assemble_momo_prompt
+from backend.core.chat_history import read_chat_history, replace_chat_image_url, write_chat_history
 from backend.core.image_job import build_image_job
 from backend.core.runtime import build_scene_transition_instruction
 from backend.core.state import (
@@ -24,12 +26,22 @@ from backend.core.state import (
 )
 from backend.services.prompt_builder import (
     build_image_prompt,
+    expand_prompt_tags,
     normalize_camera_action_tags,
-    normalize_prompt,
+    parse_clothing_status,
 )
 
 
 def main():
+    try:
+        _parse_shot({
+            "action_tags": ["presenting_foot"],
+            "camera": {"shot": "close-up", "angle": "front_view", "focus": "foot_focus"},
+        })
+    except ValueError as exc:
+        assert "exactly one of shot or focus" in str(exc)
+    else:
+        raise AssertionError("camera shot and focus must be mutually exclusive")
     assert route_domains("换套舒服的睡衣给我看看") == ["wardrobe", "photography"]
     assert route_domains("看一下") == ["photography"]
     assert route_domains("你还记得上次吗") == ["recall"]
@@ -40,9 +52,12 @@ def main():
     assert "legs_together" not in focused
     assert "covering_self" not in focused
     assert "sitting_on_bed" in focused and "lying_down" not in focused
-    weighted = normalize_prompt("rating:sensitive, (close-up, foot_focus:1.1), (black hair, white shirt:0.9)")
-    assert "(close-up, foot_focus:1.1)" in weighted
-    assert "(black hair, white shirt:0.9)" in weighted
+    assert expand_prompt_tags("(black hair, white shirt:0.9)") == ["black hair", "white shirt"]
+    assert parse_clothing_status("""## 穿着
+- 上身：上身：light blue pajamas、下身：light blue pajamas
+- 下身：上身：light blue pajamas、下身：light blue pajamas
+- 配饰：配饰：silver heart necklace、black bell collar
+""") == ["light_blue_pajamas", "silver_heart_necklace", "black_bell_collar"]
 
     original_base = settings.base_dir
     with tempfile.TemporaryDirectory() as temp:
@@ -73,6 +88,35 @@ def main():
 ## Probe的心情状态
 - calm
 """, encoding="utf-8")
+
+            directed = build_image_prompt(char, "unused", shot_spec={
+                "role_tags": ["1girl", "solo"],
+                "appearance_tags": ["petite"],
+                "wardrobe_tags": [],
+                "scene_tags": ["living_room"],
+                "action_tags": ["presenting_breasts"],
+                "pose": [],
+                "expression": ["blushing"],
+                "camera": {"shot": None, "angle": "front_view", "focus": "chest_focus"},
+                "lighting": ["soft_lighting"],
+                "rating": "sensitive",
+            })
+            assert "1girl" in directed and "petite" in directed
+            assert "white shirt" not in directed and "blue skirt" not in directed
+            assert len([tag for tag in directed.split(",") if tag.strip()]) <= 25
+
+            write_chat_history(char, [{
+                "role": "assistant",
+                "type": "image",
+                "imageUrl": "/static/probe/images/original.png",
+                "content": "",
+            }])
+            assert replace_chat_image_url(
+                char,
+                "/static/probe/images/original.png",
+                "/static/probe/images/replacement.png",
+            ) == 1
+            assert read_chat_history(char)[0]["imageUrl"] == "/static/probe/images/replacement.png"
 
             momo_prompt = assemble_momo_prompt(char, "你现在穿着什么？")
             assert "本轮开始时的客观视觉事实" in momo_prompt

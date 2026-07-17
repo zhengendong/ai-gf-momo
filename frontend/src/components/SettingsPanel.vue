@@ -92,10 +92,6 @@
             <label>外貌标签</label>
             <textarea v-model="profile.visual_anchor.appearance_tags" rows="3" placeholder="green hair, twintails, blue eyes"></textarea>
           </div>
-          <div class="form-field">
-            <label>初始化服饰</label>
-            <textarea v-model="profile.initial_outfit_tags" rows="3" placeholder="清除记录后恢复到这套穿着；留空则保留清除前当前穿着"></textarea>
-          </div>
           <button @click="saveSkin" class="save-btn">保存皮肤</button>
         </div>
       </div>

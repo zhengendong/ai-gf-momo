@@ -32,14 +32,25 @@ export function useWebSocket() {
         const data = JSON.parse(event.data)
 
         if (data.type === 'scene_divider') {
-          messages.value.push({
+          const divider = {
             id: `scene_${Date.now()}`,
             role: 'system',
             type: 'scene_divider',
             content: data.content || '新场景',
             timestamp: new Date(),
             completed: true
-          })
+          }
+          if (data.content === '故事开始') {
+            const pendingIndex = messages.value.findIndex(m => m.pendingInitial)
+            if (pendingIndex >= 0) {
+              messages.value.splice(pendingIndex, 0, divider)
+              delete messages.value[pendingIndex + 1].pendingInitial
+            } else {
+              messages.value.push(divider)
+            }
+          } else {
+            messages.value.push(divider)
+          }
 
         } else if (data.type === 'text' && data.content) {
           const lastMsg = messages.value[messages.value.length - 1]

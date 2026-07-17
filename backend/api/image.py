@@ -7,15 +7,24 @@ import logging
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
 from ..config import settings
 from ..models.schemas import ImageGenerationRequest, ImageGenerationResponse
 from ..services.comfyui import comfyui_service
 from ..services.generation_settings import load_generation_settings
+from ..tools.image_tool import ImageTool
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
 _histories: dict[str, list[dict]] = {}
+
+
+class ImageRegenerateRequest(BaseModel):
+    """Replace one recorded image using its own frozen final prompt."""
+
+    image_url: str
+    character: str | None = None
 
 
 def _history_path(character: str) -> Path:
@@ -134,6 +143,80 @@ async def generate_image(request: ImageGenerationRequest):
     except Exception as e:
         logger.error(f"图片生成失败: {e}")
         raise HTTPException(status_code=500, detail=f"图片生成失败: {str(e)}")
+
+
+@router.post("/regenerate", response_model=ImageGenerationResponse)
+async def regenerate_image(request: ImageRegenerateRequest):
+    """Regenerate one history entry and atomically replace its visible record."""
+    from ..core.characters import get_active
+    from ..core.chat_history import replace_chat_image_url
+
+    character = request.character or get_active()
+    original_url = str(request.image_url or "").strip()
+    items = _load_history(character)
+    index = next(
+        (idx for idx, item in enumerate(items) if item.get("image_url") == original_url),
+        None,
+    )
+    if index is None:
+        raise HTTPException(status_code=404, detail="未找到对应的图片历史记录")
+
+    original = dict(items[index])
+    prompt = str(original.get("prompt") or "").strip()
+    if not prompt:
+        raise HTTPException(status_code=422, detail="该历史图片没有可重用的提示词")
+
+    try:
+        if not await comfyui_service.check_status():
+            raise HTTPException(status_code=503, detail="ComfyUI 服务不可用")
+
+        profile = load_generation_settings()
+        # History already stores the final assembled prompt. Do not rebuild it
+        # from the mutable current state, otherwise this would not be a true
+        # regeneration of the selected image.
+        workflow = comfyui_service.build_workflow_from_template(
+            prompt=prompt,
+            negative_prompt=profile.negative_prompt,
+            workflow_name=profile.workflow,
+            workflow_dir=profile.workflow_dir,
+            width=profile.width,
+            height=profile.height,
+            steps=profile.steps,
+            cfg=profile.cfg,
+            sampler=profile.sampler,
+            scheduler=profile.scheduler,
+            character=character,
+            filename_prefix=character,
+            inject_character_tags=False,
+        )
+        _, comfy_history = await comfyui_service.submit_and_wait(workflow)
+        if not comfy_history:
+            raise HTTPException(status_code=504, detail="图片生成超时")
+
+        image_path = await ImageTool(comfyui_service).save_from_history(comfy_history, character)
+        if not image_path:
+            raise HTTPException(status_code=500, detail="ComfyUI 未返回可保存的最终图片")
+
+        image_url = f"/static/{character}/images/{Path(image_path).name}"
+        replacement = dict(original)
+        replacement["image_url"] = image_url
+        replacement["image_path"] = image_path
+        metadata = dict(replacement.get("generation") or {})
+        metadata["regenerated_from"] = original_url
+        metadata["regeneration_count"] = int(metadata.get("regeneration_count") or 0) + 1
+        replacement["generation"] = metadata
+
+        # Keep user files intact. The history entry and the chat reference are
+        # replaced only after a new image has completed successfully.
+        replace_chat_image_url(character, original_url, image_url)
+        items[index] = replacement
+        _save_history(character)
+        return ImageGenerationResponse(image_url=image_url, prompt_used=prompt)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("图片重新生成失败: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"图片重新生成失败: {e}")
 
 
 @router.get("/status/{task_id}")

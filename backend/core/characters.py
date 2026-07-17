@@ -16,6 +16,25 @@ from ..config import settings
 logger = logging.getLogger(__name__)
 
 
+def normalize_initial_scene(value=None) -> dict:
+    raw = value if isinstance(value, dict) else {}
+    concept = str(raw.get("concept") or "").strip()
+    if len(concept) > 4000:
+        raise ValueError("初始场景构想不能超过 4000 个字符")
+    opening_mode = str(raw.get("opening_mode") or "character_first").strip().lower()
+    if opening_mode not in {"character_first", "player_first"}:
+        raise ValueError("初始场景开场模式无效")
+    try:
+        revision = max(1, int(raw.get("revision") or 1))
+    except (TypeError, ValueError):
+        revision = 1
+    return {
+        "concept": concept,
+        "opening_mode": opening_mode,
+        "revision": revision,
+    }
+
+
 def list_characters() -> list[str]:
     """列出所有角色"""
     migrate_all_character_assets()
@@ -55,11 +74,12 @@ def create_character(name: str, profile: dict):
     char_dir.mkdir(parents=True, exist_ok=True)
 
     # profile.json 是“皮肤”文件，皮肤信息只落进 visual_anchor（不重复存平铺字段）。
-    skin_keys = {"name", "avatar", "gender", "visual_anchor", "initial_outfit_tags"}
+    skin_keys = {"name", "avatar", "gender", "visual_anchor", "initial_outfit_tags", "initial_scene"}
     default_profile = {"name": name, "avatar": "💕"}
     for k, v in profile.items():
         if k in skin_keys:
             default_profile[k] = v
+    default_profile["initial_scene"] = normalize_initial_scene(profile.get("initial_scene"))
 
     with open(char_dir / "profile.json", "w", encoding="utf-8") as f:
         json.dump(default_profile, f, ensure_ascii=False, indent=2)
@@ -76,7 +96,7 @@ def create_character(name: str, profile: dict):
     settings.get_vector_dir(name).parent.mkdir(parents=True, exist_ok=True)
 
     # 初始化记忆文件
-    from .state import _default_status
+    from .state import write_uninitialized_state
     from .memory_v3 import default_user_profile, save_user_profile, user_profile_path
     display_name = default_profile.get("name") or name
     user_profile_path(name).write_text(
@@ -87,10 +107,7 @@ def create_character(name: str, profile: dict):
         save_user_profile(name, profile["user_profile"])
     (memory_dir / "soul.md").write_text(_default_soul(display_name), encoding="utf-8")
     (memory_dir / "long_term.md").write_text(f"# {display_name}的长期记忆\n\n（随对话自然生长）\n", encoding="utf-8")
-    (memory_dir / "status.md").write_text(
-        _default_status(name, profile.get("initial_outfit_tags")),
-        encoding="utf-8",
-    )
+    write_uninitialized_state(name)
 
     logger.info(f"角色 '{name}' 创建完成")
 
@@ -160,7 +177,6 @@ def reset_character_memory(name: str):
     memory_dir = settings.get_memory_dir(name)
     images_dir = settings.get_images_dir(name)
     vector_dir = settings.get_vector_dir(name)
-    reset_outfit_tags = _reset_outfit_tags(name)
 
     _release_vector_locks()
     if memory_dir.exists():
@@ -175,7 +191,7 @@ def reset_character_memory(name: str):
     images_dir.mkdir(parents=True, exist_ok=True)
     vector_root.mkdir(parents=True, exist_ok=True)
 
-    from .state import _default_status
+    from .state import write_uninitialized_state
 
     display_name = get_profile(name).get("name") or name
     (memory_dir / "soul.md").write_text(_default_soul(display_name), encoding="utf-8")
@@ -183,28 +199,7 @@ def reset_character_memory(name: str):
         f"# {display_name}的长期记忆\n\n（随对话自然生长）\n",
         encoding="utf-8",
     )
-    (memory_dir / "status.md").write_text(_default_status(name, reset_outfit_tags), encoding="utf-8")
-
-
-def _reset_outfit_tags(name: str):
-    profile = get_profile(name)
-    initial = profile.get("initial_outfit_tags")
-    if initial:
-        return initial
-    return _current_status_outfit_tags(name)
-
-
-def _current_status_outfit_tags(name: str) -> list[str]:
-    path = settings.get_memory_dir(name) / "status.md"
-    if not path.exists():
-        return []
-    text = path.read_text(encoding="utf-8")
-    marker = "## 穿着"
-    if marker not in text:
-        return []
-    section = text.split(marker, 1)[1].split("\n## ", 1)[0]
-    from .outfit_state import parse_outfit_tags
-    return parse_outfit_tags(section)
+    write_uninitialized_state(name)
 
 
 def get_profile(name: str) -> dict:
@@ -220,6 +215,16 @@ def get_profile(name: str) -> dict:
 def update_profile(name: str, updates: dict):
     """修改角色 profile"""
     profile = get_profile(name)
+    if "initial_scene" in updates:
+        current = normalize_initial_scene(profile.get("initial_scene"))
+        incoming = normalize_initial_scene(updates.get("initial_scene"))
+        if (
+            incoming["concept"] != current["concept"]
+            or incoming["opening_mode"] != current["opening_mode"]
+        ):
+            incoming["revision"] = current["revision"] + 1
+        updates = dict(updates)
+        updates["initial_scene"] = incoming
     profile.update(updates)
     path = settings.get_character_dir(name) / "profile.json"
     with open(path, "w", encoding="utf-8") as f:

@@ -86,12 +86,20 @@
         <textarea v-model="form.user_notes" rows="3"></textarea>
       </div>
       <div class="form-field">
-        <label>初始化服饰</label>
-        <textarea v-model="form.initial_outfit_tags" rows="3" placeholder="可填中文要求，如“清凉的夏日连衣裙”；也可填英文标签。留空时按角色自动生成"></textarea>
+        <label>初始场景构想</label>
+        <textarea
+          v-model="form.initial_scene_concept"
+          rows="4"
+          placeholder="描述故事开始时希望成立的时间、地点、人物关系或穿着；留空时由角色根据设定自主构建"
+        ></textarea>
       </div>
-      <button class="secondary-action" @click="generateInitialOutfit" :disabled="outfitGenerating">
-        {{ outfitGenerating ? '生成中...' : 'AI 生成初始化服饰' }}
-      </button>
+      <div class="form-field">
+        <label>谁先开口</label>
+        <select v-model="form.initial_opening_mode">
+          <option value="character_first">角色主动打招呼</option>
+          <option value="player_first">玩家先打招呼（只渲染背景）</option>
+        </select>
+      </div>
       <div class="modal-actions">
         <button class="primary" @click="saveModal" :disabled="!form.id">创建</button>
         <button @click="closeModal">取消</button>
@@ -131,7 +139,6 @@ const {
 const profileCache = reactive({})
 const creating = ref(false)
 const openMenuFor = ref('')
-const outfitGenerating = ref(false)
 const deleteTarget = ref('')
 const deleteDisplayName = ref('')
 const deleteError = ref('')
@@ -153,7 +160,8 @@ function defaultForm() {
     user_pet_name: '',
     communication_style: '',
     user_notes: '',
-    initial_outfit_tags: '',
+    initial_scene_concept: '',
+    initial_opening_mode: 'character_first',
   }
 }
 
@@ -189,30 +197,6 @@ function applySkinMapping(item) {
   form.appearance_tags = item.appearance_tags || ''
 }
 
-async function generateInitialOutfit() {
-  outfitGenerating.value = true
-  try {
-    const r = await fetch('/api/skin-mapping/outfit', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        display_name: form.name || form.id,
-        identity: form.identity,
-        visual_anchor: {
-          role_tags: form.role_tags,
-          body_tags: form.body_tags,
-          appearance_tags: form.appearance_tags,
-        },
-        outfit_request: form.initial_outfit_tags,
-      })
-    })
-    const data = await r.json()
-    form.initial_outfit_tags = (data.outfit_tags || []).join('\n')
-  } finally {
-    outfitGenerating.value = false
-  }
-}
-
 async function saveModal() {
   if (!form.id) return
   await createCharacter(form.id, {
@@ -230,8 +214,10 @@ async function saveModal() {
       communication_style: form.communication_style,
       notes: form.user_notes,
     },
-    initial_outfit_tags: form.initial_outfit_tags,
-    auto_generate_initial_outfit: true,
+    initial_scene: {
+      concept: form.initial_scene_concept,
+      opening_mode: form.initial_opening_mode,
+    },
   })
   closeModal()
   await switchCharacter(form.id)

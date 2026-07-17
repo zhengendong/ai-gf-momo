@@ -150,6 +150,8 @@ QUALITY_TAGS = (
     "amazing quality",
 )
 
+MAX_FINAL_PROMPT_TAGS = 25
+
 LOCAL_DETAIL_FOCUS = {
     "pussy_focus",
     "foot_focus",
@@ -233,9 +235,15 @@ def parse_clothing_status(status_md: str) -> list[str]:
         if not line.startswith("-"):
             continue
         raw = line[1:].strip()
-        for tag in _split_status_tags(raw):
-            if tag not in tags:
-                tags.append(tag)
+        # status.md may contain the readable slot projection. Remove every
+        # label so legacy recursively nested values cannot leak into prompts.
+        raw = re.sub(r"(?:上身|下身|腿部|鞋子|配饰|状态)\s*：", "\n", raw)
+        for projected_value in re.split(r"[、\n]", raw):
+            if projected_value.strip() in {"", "无", "未构建"}:
+                continue
+            for tag in _split_status_tags(projected_value):
+                if tag not in tags:
+                    tags.append(tag)
 
     if not tags:
         logger.warning("穿着状态没有可用英文标签，跳过服饰注入")
@@ -324,6 +332,30 @@ def get_visual_anchor_tags(character: str) -> dict:
     }
 
 
+def expand_prompt_tags(value) -> list[str]:
+    """Return plain tags and flatten legacy explicit-weight groups.
+
+    Character profiles may still contain old ``(a, b:0.9)`` groups.  Weight
+    syntax is no longer part of the runtime prompt contract, so expose their
+    members as ordinary candidates while preserving names such as
+    ``encore (wuthering waves)``.
+    """
+    raw_values = value if isinstance(value, list) else [value]
+    result: list[str] = []
+    for raw_value in raw_values:
+        for raw in _split_prompt_tags(str(raw_value or "")):
+            match = re.fullmatch(
+                r"[\(\[]\s*(.*?)\s*:\s*\d+(?:\.\d+)?\s*[\)\]]",
+                raw,
+            )
+            members = _split_prompt_tags(match.group(1)) if match else [raw]
+            for member in members:
+                tag = member.strip()
+                if tag and _norm_tag(tag) not in {_norm_tag(item) for item in result}:
+                    result.append(tag)
+    return result
+
+
 def normalize_prompt(prompt: str) -> str:
     """标准化 prompt 标签：去重、修正非法 rating。"""
     tags = _split_prompt_tags(prompt)
@@ -384,7 +416,6 @@ def normalize_camera_action_tags(prompt: str) -> str:
         logger.info(f"已应用视角/动作规则: {rule['name']}")
 
     return ", ".join(tags)
-
 
 def _drop_generic_pose_conflicts(tags: list[str]) -> list[str]:
     """Resolve hard limb contradictions even when no special focus is set."""
@@ -579,17 +610,25 @@ def build_image_prompt(
     prompt: str,
     reply: str | None = None,
     state_snapshot: dict | None = None,
+    shot_spec: dict | None = None,
 ) -> str:
     """
     构建最终生图 prompt。
 
-    LLM 只负责本轮拍照意图/局部标签；这里统一补齐角色视觉锚点和当前服饰状态。
+    Normal runtime images use the director's complete prompt plan.  The
+    backend validates and serializes it; it does not re-inject every available
+    appearance, wardrobe or scene tag.
     """
+    if isinstance(shot_spec, dict):
+        return _build_directed_prompt(shot_spec)
+
+    # Compatibility path for legacy/manual callers that do not carry a
+    # VisualContinuityAgent ShotSpec.
     prompt = sanitize_dynamic_photo_prompt(prompt)
     visual_anchor = get_visual_anchor_tags(character)
-    avatar_role = visual_anchor["role_tags"]
-    body_type = visual_anchor["body_tags"]
-    appearance = visual_anchor["appearance_tags"]
+    avatar_role = ", ".join(expand_prompt_tags(visual_anchor["role_tags"]))
+    body_type = ", ".join(expand_prompt_tags(visual_anchor["body_tags"]))
+    appearance = ", ".join(expand_prompt_tags(visual_anchor["appearance_tags"]))
 
     prompt_norms = _semantic_norms(_split_prompt_tags(prompt))
     is_closeup = bool(prompt_norms & {"close-up", "closeup", "macro_shot"})
@@ -604,8 +643,6 @@ def build_image_prompt(
         body_type = ""
 
     appearance_tags = ", ".join(p for p in [body_type, appearance] if p)
-    if is_local_detail and appearance_tags:
-        appearance_tags = _weighted_group(appearance_tags, 0.9)
     char_tags = ", ".join(p for p in [avatar_role, appearance_tags] if p)
     # Background image generation must use the state committed by its own
     # conversation turn. Reading status.md here would allow a later turn to
@@ -613,25 +650,15 @@ def build_image_prompt(
     if state_snapshot is None:
         scene_tags = get_scene_tags(character)
         clothing_tags = get_clothing_tags(character)
-        if is_local_detail:
-            clothing_tags = _deemphasize_clothing_tags(_split_prompt_tags(clothing_tags))
     else:
         scene_tags = ", ".join(state_snapshot.get("scene_tags") or [])
         wardrobe = state_snapshot.get("wardrobe")
         if isinstance(wardrobe, dict):
             clothing_values = wardrobe_visible_prompt_tags(wardrobe)
-            clothing_tags = (
-                _deemphasize_clothing_tags(clothing_values)
-                if is_local_detail
-                else ", ".join(clothing_values)
-            )
+            clothing_tags = ", ".join(clothing_values)
         else:
             clothing_values = list(state_snapshot.get("outfit_tags") or [])
-            clothing_tags = (
-                _deemphasize_clothing_tags(clothing_values)
-                if is_local_detail
-                else ", ".join(clothing_values)
-            )
+            clothing_tags = ", ".join(clothing_values)
     dynamic_tags = _split_prompt_tags(prompt)
     view_tags: list[str] = []
     action_tags: list[str] = []
@@ -673,31 +700,48 @@ def build_image_prompt(
             )
     )
     final_prompt = _ensure_required_prompt_tags(final_prompt)
+    final_prompt = _cap_prompt_tags(final_prompt)
     logger.info(f"最终生图 prompt 已构建: character={character}, {len(final_prompt)} 字符")
     return final_prompt
 
 
-def _weighted_group(value: str, weight: float) -> str:
-    content = str(value or "").strip()
-    if not content:
-        return ""
-    rendered = f"{float(weight):.2f}".rstrip("0").rstrip(".")
-    # ComfyUI/A1111 both support explicit prompt weights in parentheses.
-    # Do not emit ``[...:0.9]``: square brackets are not a portable explicit
-    # weighting form and may be parsed as prompt editing by A1111.
-    return f"({content}:{rendered})"
+def _build_directed_prompt(shot: dict) -> str:
+    """Serialize the director-owned final prompt plan in stable priority order."""
+    camera = shot.get("camera") if isinstance(shot.get("camera"), dict) else {}
+    rating = str(shot.get("rating") or "general").removeprefix("rating:")
+    ordered = [
+        *QUALITY_TAGS,
+        f"rating:{rating}",
+        *expand_prompt_tags(shot.get("role_tags")),
+        *expand_prompt_tags(shot.get("appearance_tags")),
+        *expand_prompt_tags(shot.get("wardrobe_tags")),
+        *[str(camera.get(key)).strip() for key in ("shot", "angle", "focus") if camera.get(key)],
+        *(["pov"] if camera.get("pov") else []),
+        *expand_prompt_tags(shot.get("pose")),
+        *expand_prompt_tags(shot.get("action_tags")),
+        *expand_prompt_tags(shot.get("expression")),
+        *expand_prompt_tags(shot.get("scene_tags")),
+        *expand_prompt_tags(shot.get("lighting")),
+    ]
+    final_tags = _dedupe_tags(ordered)
+    if _has_explicit_nudity(final_tags):
+        final_tags = [
+            "rating:nsfw" if _is_rating_tag(tag) else tag
+            for tag in final_tags
+        ]
+    if len(final_tags) > MAX_FINAL_PROMPT_TAGS:
+        raise ValueError(
+            f"director prompt exceeds {MAX_FINAL_PROMPT_TAGS} tags: {len(final_tags)}"
+        )
+    final_prompt = ", ".join(final_tags)
+    logger.info("导演最终 prompt 已构建: %s tags", len(final_tags))
+    return final_prompt
 
 
-def _deemphasize_clothing_tags(tags: list[str]) -> str:
-    garments: list[str] = []
-    persistent_absence: list[str] = []
-    for tag in tags:
-        if _norm_tag(tag) in EXPLICIT_NUDE_TAGS | {"barefoot"}:
-            persistent_absence.append(tag)
-        else:
-            garments.append(tag)
-    result: list[str] = []
-    if garments:
-        result.append(_weighted_group(", ".join(garments), 0.9))
-    result.extend(persistent_absence)
-    return ", ".join(result)
+def _cap_prompt_tags(prompt: str) -> str:
+    """Compatibility-only hard cap; director plans are rejected instead."""
+    tags = _dedupe_tags(_split_prompt_tags(prompt))
+    if len(tags) > MAX_FINAL_PROMPT_TAGS:
+        logger.warning("兼容 prompt 超过 %s 标签，已按优先顺序截断", MAX_FINAL_PROMPT_TAGS)
+        tags = tags[:MAX_FINAL_PROMPT_TAGS]
+    return ", ".join(tags)

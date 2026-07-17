@@ -1,18 +1,19 @@
 {
-  "active_character": "小古",
+  "active_character": "xiaowen",
   "context": {
-    "max_tokens": 100000,
+    "max_tokens": 1000000,
     "compress_at": 0.85
   },
   "comfyui": {
-    "workflow": "ANIMA_workflow.json",
+    "root_dir": "D:\\ComfyUI",
+    "workflow": "waiNSFWIllustrious_v140.json",
     "negative_prompt": "bad quality,worst quality,worst detail,sketch,censor",
-    "sampler": "euler",
-    "scheduler": "simple",
-    "steps": 10,
-    "cfg": 1,
-    "width": 1024,
-    "height": 1024
+    "sampler": null,
+    "scheduler": null,
+    "steps": null,
+    "cfg": null,
+    "width": null,
+    "height": null
   },
   "heartbeat": {
     "interval_minutes": 30,

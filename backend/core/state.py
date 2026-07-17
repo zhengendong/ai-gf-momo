@@ -23,6 +23,7 @@ from .wardrobe import (
 )
 
 logger = logging.getLogger(__name__)
+UNINITIALIZED_MARKER = "未构建"
 
 def _character_name(character: str) -> str:
     from .context import get_character_name
@@ -96,6 +97,17 @@ def capture_state_snapshot(character: str) -> dict:
     """Return a self-contained visual state snapshot for an asynchronous job."""
     status = read_status(character)
     previous = read_state_snapshot(character)
+    initialized = previous.get("initialized")
+    if initialized is None:
+        initialized = UNINITIALIZED_MARKER not in status
+    if initialized is False:
+        return {
+            "version": int(previous.get("version") or 0),
+            "initialized": False,
+            "wardrobe": None,
+            "outfit_tags": [],
+            "scene_tags": [],
+        }
     wardrobe = previous.get("wardrobe")
     if isinstance(wardrobe, dict):
         wardrobe = normalize_wardrobe(wardrobe)
@@ -103,6 +115,7 @@ def capture_state_snapshot(character: str) -> dict:
         wardrobe = wardrobe_from_tags(_read_section_tags(status, "穿着"))
     return {
         "version": int(previous.get("version") or 0),
+        "initialized": True,
         "wardrobe": deepcopy(wardrobe),
         # Compatibility projection for old image and API consumers.  It is a
         # render projection, not the canonical layered wardrobe.
@@ -267,18 +280,29 @@ def merge_continuity_patch(state_snapshot: dict, state_patch: dict | None) -> di
 
     return {
         "version": int(previous.get("version") or 0),
+        "initialized": bool(previous.get("initialized", True)),
         "wardrobe": next_wardrobe,
         "outfit_tags": wardrobe_visible_tags(next_wardrobe),
         "scene_tags": scene_tags,
     }
 
 
-def commit_continuity_patch(character: str, state_patch: dict | None) -> tuple[dict, bool]:
+def commit_continuity_patch(
+    character: str,
+    state_patch: dict | None,
+    *,
+    initialize: bool = False,
+) -> tuple[dict, bool]:
     """Persist one validated continuity patch and return its frozen snapshot."""
     previous = capture_state_snapshot(character)
+    if initialize:
+        validate_initial_state_patch(state_patch)
     merged = merge_continuity_patch(previous, state_patch)
+    if initialize:
+        merged["initialized"] = True
     changed = (
-        merged["wardrobe"] != previous.get("wardrobe")
+        merged["initialized"] != previous.get("initialized")
+        or merged["wardrobe"] != previous.get("wardrobe")
         or merged["scene_tags"] != list(previous.get("scene_tags") or [])
     )
     if not changed:
@@ -330,6 +354,39 @@ def _write_state_snapshot(
     path.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def write_uninitialized_state(character: str):
+    """Create an explicit not-yet-built visual state without implying nudity."""
+    write_status(character, _default_status(character))
+    path = get_state_snapshot_path(character)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({
+        "version": 0,
+        "initialized": False,
+        "wardrobe": None,
+        "outfit_tags": [],
+        "scene_tags": [],
+    }, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def is_state_initialized(character: str) -> bool:
+    return bool(capture_state_snapshot(character).get("initialized"))
+
+
+def validate_initial_state_patch(state_patch: dict | None):
+    if not isinstance(state_patch, dict):
+        raise ValueError("初始场景必须提交完整视觉状态")
+    wardrobe_patch = state_patch.get("wardrobe")
+    if not isinstance(wardrobe_patch, dict):
+        raise ValueError("初始场景必须明确角色实际穿着")
+    required_slots = {"upper", "lower", "legwear", "footwear"}
+    missing = required_slots - set(wardrobe_patch)
+    if missing:
+        raise ValueError(f"初始场景缺少完整服饰槽位: {', '.join(sorted(missing))}")
+    scene_patch = state_patch.get("scene")
+    if not isinstance(scene_patch, dict) or not scene_patch.get("tags"):
+        raise ValueError("初始场景必须明确时间和地点")
+
+
 def _read_section_tags(status: str, section: str) -> list[str]:
     match = re.search(rf"## {re.escape(section)}\n(.*?)(?=## |\Z)", status, re.DOTALL)
     if not match:
@@ -337,17 +394,22 @@ def _read_section_tags(status: str, section: str) -> list[str]:
     result = []
     for line in match.group(1).splitlines():
         value = line.strip().removeprefix("-").strip()
-        if section == "穿着" and "：" in value:
-            _, value = value.split("：", 1)
-            value = value.split("（", 1)[0].strip()
-            if value == "无":
+        values = [value]
+        if section == "穿着":
+            # status.md is a readable projection, not a flat tag list. Strip
+            # every slot label, not only the first one: older reset paths could
+            # accidentally feed an already projected line back into this
+            # parser, producing recursive values such as
+            # ``上身：上身：shirt、下身：skirt``.
+            value = re.sub(r"(?:上身|下身|腿部|鞋子|配饰|状态)\s*：", "\n", value)
+            values = re.split(r"[、\n]", value)
+        for raw_value in values:
+            normalized = raw_value.split("（", 1)[0].strip()
+            if not normalized or normalized in {"无", UNINITIALIZED_MARKER}:
                 continue
-            value = value.replace("、", "\n")
-        if "\n" in value:
-            result.extend(v.strip().replace(" ", "_") for v in value.splitlines() if v.strip())
-            continue
-        if value:
-            result.append(value.replace(" ", "_"))
+            tag = normalized.replace(" ", "_")
+            if tag not in result:
+                result.append(tag)
     return result
 
 
@@ -463,14 +525,7 @@ def _deep_merge_markdown(character: str, current_text: str, updates: dict) -> st
 
 def _coerce_outfit_tags(outfit_tags=None) -> str:
     if outfit_tags is None:
-        tags = [
-            "white_shirt",
-            "black_pleated_skirt",
-            "black_mary_jane_shoes",
-            "white_thighhighs",
-            "silver_heart_necklace",
-            "black_bell_collar",
-        ]
+        tags = []
     elif isinstance(outfit_tags, str):
         tags = []
         for line in outfit_tags.replace(",", "\n").splitlines():
@@ -485,21 +540,15 @@ def _coerce_outfit_tags(outfit_tags=None) -> str:
 
 
 def _default_status(character: str = "momo", outfit_tags=None) -> str:
-    """默认状态"""
+    """Return an explicit uninitialized state; no visual facts are implied."""
     char_name = _character_name(character)
-    outfit = _wardrobe_to_status_markdown(wardrobe_from_tags(
-        [line.removeprefix("-").strip() for line in _coerce_outfit_tags(outfit_tags).splitlines() if line.strip()]
-    ))
     return f"""# {char_name}的状态
 
 ## 穿着
-{outfit}
+- {UNINITIALIZED_MARKER}
 
 ## 场景细节
-- bedroom
-- indoors
-- evening
-- warm_lighting
+- {UNINITIALIZED_MARKER}
 """
 
 

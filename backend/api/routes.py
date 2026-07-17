@@ -67,6 +67,7 @@ class ProfileUpdate(BaseModel):
     appearance: str = None
     visual_anchor: dict = None
     initial_outfit_tags: list[str] | str | None = None
+    initial_scene: dict = None
 
 
 class CreateCharacterRequest(BaseModel):
@@ -82,6 +83,7 @@ class CreateCharacterRequest(BaseModel):
     user_profile: dict = None
     initial_outfit_tags: list[str] | str | None = None
     auto_generate_initial_outfit: bool = True
+    initial_scene: dict = None
 
 
 class OutfitGenerateRequest(BaseModel):
@@ -130,28 +132,6 @@ async def create_char(request: CreateCharacterRequest):
             "body_tags": request.body_type,
             "appearance_tags": request.appearance,
         }
-        initial_outfit_tags = []
-        outfit_request = _outfit_request_text(request.initial_outfit_tags)
-        if outfit_request and _should_generate_outfit_from_request(outfit_request):
-            generated = await _generate_initial_outfit(
-                request.display_name or request.name,
-                visual_anchor,
-                request.identity,
-                {},
-                outfit_request,
-            )
-            initial_outfit_tags = generated["outfit_tags"]
-        elif outfit_request:
-            initial_outfit_tags = _clean_outfit_tags(outfit_request)
-
-        if not initial_outfit_tags and request.auto_generate_initial_outfit:
-            generated = await _generate_initial_outfit(
-                request.display_name or request.name,
-                visual_anchor,
-                request.identity,
-                {},
-            )
-            initial_outfit_tags = generated["outfit_tags"]
         # 皮肤信息只落 visual_anchor（profile.json 里只有这一份真相）。
         # avatar_role / body_type / appearance / gender 都不再回写到 profile.json 顶层。
         create_character(request.name, {
@@ -161,7 +141,9 @@ async def create_char(request: CreateCharacterRequest):
             "visual_anchor": visual_anchor,
             "identity": request.identity,
             "user_profile": request.user_profile,
-            "initial_outfit_tags": initial_outfit_tags,
+            # Legacy field remains accepted but no longer seeds runtime state.
+            "initial_outfit_tags": request.initial_outfit_tags or [],
+            "initial_scene": request.initial_scene or {},
         })
         return {"status": "ok", "name": request.name}
     except ValueError as e:

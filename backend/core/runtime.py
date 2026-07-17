@@ -4,7 +4,6 @@ import asyncio
 import json
 import logging
 import time
-from datetime import datetime
 from typing import Protocol
 
 from ..agents.image import ImagePipeline
@@ -12,7 +11,8 @@ from ..agents.image_director import VisualContinuityAgent, VisualContinuityError
 from ..agents.memory import MemoryAgent
 from ..agents.momo import MomoAgent
 from ..config import settings
-from ..core.chat_history import append_chat_pair, append_scene_transition, read_chat_history
+from ..core.chat_history import append_chat_pair, append_initial_scene, append_scene_transition, read_chat_history
+from ..core.characters import get_profile, normalize_initial_scene
 from ..core.context import (
     append_daily_memory,
     assemble_momo_prompt,
@@ -36,6 +36,7 @@ from ..core.state import (
     apply_state_updates,
     capture_state_snapshot,
     commit_continuity_patch,
+    is_state_initialized,
 )
 from ..models.schemas import StreamChunk
 
@@ -51,6 +52,12 @@ SCENE_TRANSITION_BASE = (
     "需要换装时自然明确本幕实际穿着，合理时也可以保持原穿着。"
     "直接输出已经发生的下一幕，可以是纯情景叙述，也可以包含角色动作和台词，"
     "不要解释设计过程。"
+)
+
+INITIAL_SCENE_BASE = (
+    "根据角色身份、性格、人物关系和初始场景构想，构建故事真正开始时的第一幕。"
+    "必须自然且明确地建立虚拟故事的时间或时间段、具体地点与环境、角色当前实际穿着，"
+    "以及角色正在进行的动作或所处状态。直接输出已经发生的故事开场，不要解释设计过程。"
 )
 
 
@@ -78,6 +85,42 @@ def build_scene_transition_instruction(mode: str, concept: str = "") -> str:
     if normalized_mode == "manual":
         return f"{SCENE_TRANSITION_BASE}\n\n用户对下一幕的构想：{idea}"
     return SCENE_TRANSITION_BASE
+
+
+def build_initial_scene_instruction(
+    concept: str = "",
+    opening_mode: str = "character_first",
+    first_user_message: str = "",
+) -> str:
+    mode = str(opening_mode or "character_first").strip().lower()
+    if mode not in {"character_first", "player_first"}:
+        raise ValueError("初始场景开场模式无效")
+    idea = str(concept or "").strip()
+    first_message = str(first_user_message or "").strip()
+    if len(idea) > 4000:
+        raise ValueError("初始场景构想不能超过 4000 个字符")
+
+    parts = [INITIAL_SCENE_BASE]
+    if idea:
+        parts.append(
+            "玩家保存的初始场景事实构想如下。把其中明确的设定视为开场事实，"
+            "但不要机械复刻过去的措辞、旁白、动作或服饰描述细节；每次都可以自然地重新组织表达。"
+        )
+        parts.append(f"初始场景事实构想：{idea}")
+    else:
+        parts.append("玩家没有预设初始场景；请依据角色设定和双方关系自主设计自然、具体的故事开场。")
+
+    if first_message:
+        parts.append(
+            "玩家已经发出了故事中的第一条消息。先建立开场背景，再让角色自然回应这条消息；"
+            "不得把它改写成系统指令。"
+        )
+        parts.append(f"玩家第一条消息：{first_message}")
+    elif mode == "character_first":
+        parts.append("由角色主动开始互动；背景建立后必须包含符合角色身份和关系的自然开场白。")
+    else:
+        parts.append("由玩家先开口；只渲染背景、角色穿着、动作和所处状态，不让角色主动说话。")
+    return "\n\n".join(parts)
 
 
 def _recent_visual_dialogue(
@@ -155,7 +198,42 @@ class AgentRuntime:
         """Serialize decisions and state commits for the same character."""
         lock = self._character_locks.setdefault(character, asyncio.Lock())
         async with lock:
-            await self._handle_message(session_id, character, content)
+            if not is_state_initialized(character):
+                initial_scene = normalize_initial_scene(get_profile(character).get("initial_scene"))
+                instruction = build_initial_scene_instruction(
+                    initial_scene["concept"],
+                    opening_mode="player_first",
+                    first_user_message=content,
+                )
+                await self._handle_message(
+                    session_id,
+                    character,
+                    instruction,
+                    interaction_mode="initial_scene_with_user",
+                    interaction_summary=content,
+                    persisted_user_message=content,
+                )
+            else:
+                await self._handle_message(session_id, character, content)
+
+    async def handle_initial_scene(self, session_id: str, character: str):
+        """Build the saved opening template without changing it."""
+        lock = self._character_locks.setdefault(character, asyncio.Lock())
+        async with lock:
+            if is_state_initialized(character):
+                raise ValueError("当前故事已经开始；初始场景设置将在下次清空记录后生效。")
+            initial_scene = normalize_initial_scene(get_profile(character).get("initial_scene"))
+            instruction = build_initial_scene_instruction(
+                initial_scene["concept"],
+                opening_mode=initial_scene["opening_mode"],
+            )
+            await self._handle_message(
+                session_id,
+                character,
+                instruction,
+                interaction_mode=f"initial_scene_{initial_scene['opening_mode']}",
+                interaction_summary="构建初始场景",
+            )
 
     async def handle_scene_transition(
         self,
@@ -188,6 +266,7 @@ class AgentRuntime:
         *,
         interaction_mode: str = "chat",
         interaction_summary: str = "",
+        persisted_user_message: str = "",
     ):
         started_at = time.perf_counter()
         char = character
@@ -204,8 +283,9 @@ class AgentRuntime:
                 recent_context = "\n".join(
                     str(item.get("content") or "") for item in persisted
                 )
+            routing_content = persisted_user_message or content
             business_knowledge = load_relevant_knowledge(
-                content,
+                routing_content,
                 recent_context,
             )
             base_prompt = assemble_momo_prompt(
@@ -225,7 +305,7 @@ class AgentRuntime:
             )
             if not chat_history and history:
                 chat_history = "\n".join(history[-MAX_HISTORY_TURNS:])
-            recalled_memories = recall_vector_context(char, content)
+            recalled_memories = recall_vector_context(char, routing_content)
             logger.info(
                 "Runtime context ready: character=%s elapsed=%.3fs history_chars=%s",
                 char,
@@ -287,10 +367,12 @@ class AgentRuntime:
                     business_knowledge=business_knowledge,
                     interaction_mode=interaction_mode,
                 )
+                is_initial_scene = interaction_mode.startswith("initial_scene")
                 frozen_snapshot, wrote_runtime_state = await asyncio.to_thread(
                     commit_continuity_patch,
                     char,
                     continuity.state_patch,
+                    initialize=is_initial_scene,
                 )
             except (VisualContinuityError, TypeError, ValueError) as exc:
                 logger.error("Visual continuity failed for %s: %s", char, exc)
@@ -321,7 +403,13 @@ class AgentRuntime:
             if wrote_runtime_state:
                 await self.push_current_state(session_id, char)
 
-            if interaction_mode == "scene_transition":
+            if interaction_mode.startswith("initial_scene"):
+                await self.sender.send_chunk(
+                    session_id,
+                    StreamChunk(type="scene_divider", content="故事开始"),
+                    character=char,
+                )
+            elif interaction_mode == "scene_transition":
                 await self.sender.send_chunk(
                     session_id,
                     StreamChunk(type="scene_divider", content="新场景"),
@@ -336,7 +424,7 @@ class AgentRuntime:
 
             memory_candidate = (
                 None
-                if interaction_mode == "scene_transition"
+                if interaction_mode == "scene_transition" or interaction_mode.startswith("initial_scene")
                 else output.memory_candidate or output.immediate_memory
             )
             if memory_candidate:
@@ -358,7 +446,13 @@ class AgentRuntime:
                 image_job.dynamic_prompt if image_job else None,
                 interaction_mode=interaction_mode,
             ))
-            if interaction_mode == "scene_transition":
+            if interaction_mode.startswith("initial_scene"):
+                bg_tasks.schedule(self._async_append_initial_scene(
+                    char,
+                    output.reply,
+                    persisted_user_message,
+                ))
+            elif interaction_mode == "scene_transition":
                 bg_tasks.schedule(self._async_append_scene_transition(char, output.reply))
             else:
                 bg_tasks.schedule(
@@ -391,8 +485,10 @@ class AgentRuntime:
                     character=char,
                 )
 
-            if interaction_mode != "scene_transition":
+            if interaction_mode == "chat":
                 history.append(f"{user_label}：{content}")
+            elif interaction_mode == "initial_scene_with_user" and persisted_user_message:
+                history.append(f"{user_label}：{persisted_user_message}")
             history.append(f"{char_name}：{output.reply}")
             self.chat_history_buffer[buffer_key] = history[-MAX_HISTORY_TURNS:]
 
@@ -469,6 +565,7 @@ class AgentRuntime:
                     type="state_update",
                     content=json.dumps({
                         "character": character,
+                        "initialized": is_state_initialized(character),
                         "status": self._parse_status_sections(status_content, character),
                     }, ensure_ascii=False),
                 ),
@@ -546,13 +643,14 @@ class AgentRuntime:
         interaction_mode: str = "chat",
     ):
         try:
-            now = datetime.now().strftime("%H:%M")
             user_label = get_user_pet_name(character)
             char_name = get_character_name(character)
-            if interaction_mode == "scene_transition":
-                content = f"### {now} 场景切换：\n{user_msg}\n\n### 新场景：\n{reply}"
+            if interaction_mode.startswith("initial_scene"):
+                content = f"### 故事开始：\n{user_msg}\n\n### 开场：\n{reply}"
+            elif interaction_mode == "scene_transition":
+                content = f"### 场景切换：\n{user_msg}\n\n### 新场景：\n{reply}"
             else:
-                content = f"### {now} {user_label}说：\n{user_msg}\n\n### {char_name}说：\n{reply}"
+                content = f"### {user_label}说：\n{user_msg}\n\n### {char_name}说：\n{reply}"
             if photo_prompt:
                 content += f"\n\n📷 {photo_prompt}"
             append_daily_memory(character, content)
@@ -570,6 +668,17 @@ class AgentRuntime:
             append_scene_transition(character, reply)
         except Exception as e:
             logger.error("Append scene transition failed for %s: %s", character, e)
+
+    async def _async_append_initial_scene(
+        self,
+        character: str,
+        reply: str,
+        user_message: str = "",
+    ):
+        try:
+            append_initial_scene(character, reply, user_message)
+        except Exception as e:
+            logger.error("Append initial scene failed for %s: %s", character, e)
 
     async def _async_index_vector_memory(self, character: str, user_msg: str, reply: str):
         try:

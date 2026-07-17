@@ -59,7 +59,7 @@ class ContinuityOutput(BaseModel):
     )
     shot_spec: Optional[dict[str, Any]] = Field(
         None,
-        description="仅在 image_goal 存在时生成的动作、姿势与镜头设计",
+        description="仅在 image_goal 存在时生成的最终提示词标签计划与镜头设计",
     )
     reason: str = Field("", description="仅供内部诊断的连续性判断摘要")
 

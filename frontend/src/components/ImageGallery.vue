@@ -48,6 +48,7 @@ const props = defineProps({
   characterName: { type: String, default: '...' },
   activeCharId: String,
   imageStatus: String,
+  refreshToken: { type: Number, default: 0 },
 })
 
 const open = ref(false)
@@ -73,6 +74,11 @@ watch(() => props.activeCharId, async () => {
 
 watch(() => props.imageStatus, async (status) => {
   if (status === 'done') await fetchHistory(100, props.activeCharId)
+})
+
+watch(() => props.refreshToken, async () => {
+  selected.value = null
+  await fetchHistory(open.value ? 100 : 20, props.activeCharId)
 })
 
 fetchHistory(20, props.activeCharId)

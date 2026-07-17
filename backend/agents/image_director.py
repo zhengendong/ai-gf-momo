@@ -8,9 +8,10 @@ import re
 from typing import Any
 
 from ..config import settings
-from ..core.state import merge_continuity_patch
-from ..core.wardrobe import wardrobe_agent_view, wardrobe_visible_tags
+from ..core.state import merge_continuity_patch, validate_initial_state_patch
+from ..core.wardrobe import wardrobe_agent_view, wardrobe_visible_prompt_tags, wardrobe_visible_tags
 from ..models.schemas import ContinuityOutput
+from ..services.prompt_builder import expand_prompt_tags, get_visual_anchor_tags
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +40,7 @@ class VisualContinuityAgent:
         interaction_mode: str = "chat",
     ) -> ContinuityOutput:
         """Resolve every turn; retry once when JSON or state structure is invalid."""
+        visual_anchor = get_visual_anchor_tags(character)
         payload = {
             "character": character,
             "user_message": user_message,
@@ -48,10 +50,17 @@ class VisualContinuityAgent:
             "recent_dialogue": list(recent_dialogue or [])[-16:],
             "previous_state": {
                 "version": int(previous_state.get("version") or 0),
+                "initialized": bool(previous_state.get("initialized", True)),
                 "wardrobe": wardrobe_agent_view(previous_state.get("wardrobe") or {}),
                 "scene_tags": list(previous_state.get("scene_tags") or []),
             },
             "applicable_business_knowledge": business_knowledge,
+            "prompt_inputs": {
+                "role_tags": expand_prompt_tags(visual_anchor.get("role_tags")),
+                "body_tags": expand_prompt_tags(visual_anchor.get("body_tags")),
+                "appearance_tags": expand_prompt_tags(visual_anchor.get("appearance_tags")),
+                "instruction": "role_tags 必须全部保留；body/appearance、最终服饰与场景由你按本图重点筛选。",
+            },
         }
         last_error: Exception | None = None
         last_raw = ""
@@ -71,8 +80,16 @@ class VisualContinuityAgent:
                 )
                 last_raw = raw or ""
                 result = self._parse(last_raw, image_goal)
+                if interaction_mode.startswith("initial_scene"):
+                    validate_initial_state_patch(result.state_patch)
                 # Dry-run the exact patch before any user-visible reply or file write.
-                merge_continuity_patch(previous_state, result.state_patch)
+                merged_state = merge_continuity_patch(previous_state, result.state_patch)
+                if result.shot_spec is not None:
+                    _validate_prompt_plan(
+                        result.shot_spec,
+                        visual_anchor=visual_anchor,
+                        merged_state=merged_state,
+                    )
                 return result
             except Exception as exc:
                 last_error = exc
@@ -181,23 +198,39 @@ class VisualContinuityAgent:
 
 def _parse_shot(data: dict[str, Any]) -> dict[str, Any]:
     camera = data.get("camera") if isinstance(data.get("camera"), dict) else {}
+    shot = _optional_string(camera.get("shot"))
+    focus = _optional_string(camera.get("focus"))
+    if bool(shot) == bool(focus):
+        raise ValueError("camera requires exactly one of shot or focus")
     rating = str(data.get("rating") or "general").removeprefix("rating:")
     if rating not in {"general", "sensitive", "nsfw"}:
         rating = "general"
+    action_tags = _bounded_string_list(data.get("action_tags"), "action_tags", 2)
+    if not action_tags:
+        raise ValueError("shot_spec requires one precise core action")
+    generic_actions = {
+        "standing", "sitting", "lying", "lying_down", "on_back",
+        "on_knees", "all_fours", "crouching", "squatting",
+    }
+    if _norm_tag(action_tags[0]) in generic_actions:
+        raise ValueError("action_tags[0] must be a visible action, not a generic pose")
     return {
         "generate": True,
         "reason": str(data.get("reason") or "").strip(),
-        "action_tags": _bounded_string_list(data.get("action_tags"), "action_tags", 3),
-        "pose": _bounded_string_list(data.get("pose"), "pose", 2),
-        "expression": _bounded_string_list(data.get("expression"), "expression", 2),
+        "role_tags": _bounded_string_list(data.get("role_tags"), "role_tags", 12),
+        "appearance_tags": _bounded_string_list(data.get("appearance_tags"), "appearance_tags", 5),
+        "wardrobe_tags": _bounded_string_list(data.get("wardrobe_tags"), "wardrobe_tags", 4),
+        "scene_tags": _bounded_string_list(data.get("scene_tags"), "scene_tags", 2),
+        "action_tags": action_tags,
+        "pose": _bounded_string_list(data.get("pose"), "pose", 1),
+        "expression": _bounded_string_list(data.get("expression"), "expression", 1),
         "camera": {
-            "shot": _optional_string(camera.get("shot")),
+            "shot": shot,
             "angle": _optional_string(camera.get("angle")),
-            "focus": _optional_string(camera.get("focus")),
+            "focus": focus,
             "pov": bool(camera.get("pov", False)),
         },
-        "lighting": _bounded_string_list(data.get("lighting"), "lighting", 2),
-        "emphasis": _parse_emphasis(data.get("emphasis")),
+        "lighting": _bounded_string_list(data.get("lighting"), "lighting", 1),
         "rating": rating,
     }
 
@@ -222,20 +255,6 @@ def _bounded_string_list(value: Any, field: str, limit: int) -> list[str]:
     return result
 
 
-def _parse_emphasis(value: Any) -> dict[str, Any] | None:
-    if value is None:
-        return None
-    if not isinstance(value, dict):
-        raise ValueError("emphasis must be an object or null")
-    tags = _bounded_string_list(value.get("tags"), "emphasis.tags", 3)
-    if not tags:
-        raise ValueError("emphasis requires at least one tag")
-    weight = float(value.get("weight") or 0)
-    if not 1.05 <= weight <= 1.20:
-        raise ValueError("emphasis.weight must be between 1.05 and 1.20")
-    return {"tags": tags, "weight": round(weight, 2)}
-
-
 def _optional_string(value: Any) -> str | None:
     item = str(value or "").strip()
     return item or None
@@ -243,6 +262,56 @@ def _optional_string(value: Any) -> str | None:
 
 def _norm_tag(value: Any) -> str:
     return str(value or "").strip().lower().replace(" ", "_")
+
+
+def _validate_prompt_plan(
+    shot: dict[str, Any],
+    *,
+    visual_anchor: dict[str, Any],
+    merged_state: dict[str, Any],
+) -> None:
+    """Ensure the director's final prompt plan only selects committed facts."""
+    required_roles = expand_prompt_tags(visual_anchor.get("role_tags"))
+    selected_roles = _string_list(shot.get("role_tags"))
+    if {_norm_tag(tag) for tag in selected_roles} != {_norm_tag(tag) for tag in required_roles}:
+        raise ValueError("role_tags must preserve every configured character role tag exactly")
+
+    appearance_candidates = [
+        *expand_prompt_tags(visual_anchor.get("body_tags")),
+        *expand_prompt_tags(visual_anchor.get("appearance_tags")),
+    ]
+    wardrobe_candidates = wardrobe_visible_prompt_tags(merged_state.get("wardrobe") or {})
+    scene_candidates = list(merged_state.get("scene_tags") or [])
+    _require_subset("appearance_tags", shot.get("appearance_tags"), appearance_candidates)
+    _require_subset("wardrobe_tags", shot.get("wardrobe_tags"), wardrobe_candidates)
+    _require_subset("scene_tags", shot.get("scene_tags"), scene_candidates)
+    if scene_candidates and not _string_list(shot.get("scene_tags")):
+        raise ValueError("scene_tags must keep one or two scene-defining tags")
+
+    camera = shot.get("camera") if isinstance(shot.get("camera"), dict) else {}
+    planned = [
+        "masterpiece", "best quality", "amazing quality",
+        f"rating:{shot.get('rating') or 'general'}",
+        *selected_roles,
+        *_string_list(shot.get("appearance_tags")),
+        *_string_list(shot.get("wardrobe_tags")),
+        *[camera.get(key) for key in ("shot", "angle", "focus") if camera.get(key)],
+        *(["pov"] if camera.get("pov") else []),
+        *_string_list(shot.get("pose")),
+        *_string_list(shot.get("action_tags")),
+        *_string_list(shot.get("expression")),
+        *_string_list(shot.get("scene_tags")),
+        *_string_list(shot.get("lighting")),
+    ]
+    if len({_norm_tag(tag) for tag in planned if str(tag or "").strip()}) > 25:
+        raise ValueError("final prompt plan exceeds the 25-tag budget")
+
+
+def _require_subset(field: str, selected: Any, candidates: list[str]) -> None:
+    allowed = {_norm_tag(tag) for tag in candidates}
+    unknown = [tag for tag in _string_list(selected) if _norm_tag(tag) not in allowed]
+    if unknown:
+        raise ValueError(f"{field} contains tags outside committed candidates: {unknown}")
 
 
 # Compatibility import for code outside the runtime that still uses the old name.

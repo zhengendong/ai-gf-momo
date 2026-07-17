@@ -35,6 +35,9 @@ def build_image_job(
     if image_intent and image_intent.get("generate") is False:
         return None
 
+    frozen_state = deepcopy(state_snapshot) if state_snapshot is not None else capture_state_snapshot(character)
+    if frozen_state.get("initialized") is False:
+        return None
     dynamic_prompt = legacy_prompt or compile_image_intent(image_intent or {})
     if not dynamic_prompt.strip():
         return None
@@ -43,7 +46,7 @@ def build_image_job(
         character=character,
         reply=reply,
         dynamic_prompt=dynamic_prompt,
-        state_snapshot=deepcopy(state_snapshot) if state_snapshot is not None else capture_state_snapshot(character),
+        state_snapshot=frozen_state,
         image_goal=deepcopy(image_goal) if image_goal is not None else None,
         shot_spec=deepcopy(image_intent) if image_intent is not None else None,
     )
@@ -65,19 +68,6 @@ def compile_image_intent(intent: dict[str, Any]) -> str:
         if camera.get("pov"):
             tags.append("pov")
 
-    emphasis = intent.get("emphasis")
-    if isinstance(emphasis, dict):
-        emphasis_tags = _as_tags(emphasis.get("tags"))[:3]
-        try:
-            weight = float(emphasis.get("weight") or 0)
-        except (TypeError, ValueError):
-            weight = 0
-        if emphasis_tags and 1.05 <= weight <= 1.20:
-            emphasized_norms = {_norm_tag(tag) for tag in emphasis_tags}
-            tags = [tag for tag in tags if _norm_tag(tag) not in emphasized_norms]
-            rendered_weight = f"{weight:.2f}".rstrip("0").rstrip(".")
-            tags.append(f"({', '.join(emphasis_tags)}:{rendered_weight})")
-
     return ", ".join(_dedupe(tags))
 
 
@@ -86,16 +76,6 @@ def _extend(target: list[str], value: Any):
         target.extend(part.strip() for part in value.split(",") if part.strip())
     elif isinstance(value, list):
         target.extend(str(part).strip() for part in value if str(part).strip())
-
-
-def _as_tags(value: Any) -> list[str]:
-    result: list[str] = []
-    _extend(result, value)
-    return result
-
-
-def _norm_tag(value: Any) -> str:
-    return str(value or "").strip().lower().replace(" ", "_")
 
 
 def _dedupe(tags: list[str]) -> list[str]:

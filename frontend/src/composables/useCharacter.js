@@ -10,6 +10,11 @@ const profile = reactive({
   gender: 'female',
   avatar: '',
   initial_outfit_tags: '',
+  initial_scene: {
+    concept: '',
+    opening_mode: 'character_first',
+    revision: 1
+  },
   visual_anchor: {
     role_tags: '',
     body_tags: '',
@@ -23,6 +28,11 @@ const emptyProfile = () => ({
   gender: 'female',
   avatar: '',
   initial_outfit_tags: '',
+  initial_scene: {
+    concept: '',
+    opening_mode: 'character_first',
+    revision: 1
+  },
   visual_anchor: {
     role_tags: '',
     body_tags: '',
@@ -90,6 +100,11 @@ export function useCharacter() {
       gender: profile.gender,
       avatar: profile.avatar,
       initial_outfit_tags: profile.initial_outfit_tags || '',
+      initial_scene: {
+        concept: profile.initial_scene?.concept || '',
+        opening_mode: profile.initial_scene?.opening_mode || 'character_first',
+        revision: profile.initial_scene?.revision || 1,
+      },
       visual_anchor: {
         role_tags: profile.visual_anchor?.role_tags || '',
         body_tags: profile.visual_anchor?.body_tags || '',

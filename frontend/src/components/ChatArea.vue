@@ -2,9 +2,14 @@
   <div class="chat-area">
     <div class="chat-header">
       <span class="name">{{ characterAvatar }} {{ characterName }}</span>
-      <span class="status" :class="{ online: isConnected }">
-        {{ isConnected ? '在线' : '离线' }}
-      </span>
+      <div class="header-actions">
+        <button class="image-visibility-btn" @click="imagesVisible = !imagesVisible">
+          {{ imagesVisible ? '隐藏图片' : '显示图片' }}
+        </button>
+        <span class="status" :class="{ online: isConnected }">
+          {{ isConnected ? '在线' : '离线' }}
+        </span>
+      </div>
     </div>
     <div class="messages" ref="msgList">
       <div v-if="messages.length === 0" class="welcome">
@@ -17,7 +22,20 @@
         </div>
         <template v-else>
           <div v-if="isImage(msg)" class="image-bubble">
-            <img :src="imageSrc(msg)" :alt="`${characterName}的照片`" />
+            <template v-if="imagesVisible">
+              <img :src="imageSrc(msg)" :alt="`${characterName}的照片`" />
+            </template>
+            <div v-else class="image-hidden">图片已隐藏</div>
+            <button
+              class="regenerate-btn"
+              :disabled="regeneratingImageUrl === imageSrc(msg)"
+              @click="emit('regenerate', imageSrc(msg))"
+            >
+              {{ regeneratingImageUrl === imageSrc(msg) ? '重新生成中…' : '重新生成' }}
+            </button>
+            <p v-if="regenerationError?.imageUrl === imageSrc(msg)" class="regenerate-error">
+              {{ regenerationError.message }}
+            </p>
             <p v-if="msg.content">{{ msg.content }}</p>
           </div>
           <div v-else-if="msg.type === 'image_pending'" class="image-pending">
@@ -57,12 +75,15 @@ const props = defineProps({
   isConnected: Boolean,
   characterName: { type: String, default: '...' },
   characterAvatar: String,
+  regeneratingImageUrl: { type: String, default: '' },
+  regenerationError: { type: Object, default: null },
 })
-const emit = defineEmits(['send'])
+const emit = defineEmits(['send', 'regenerate'])
 
 const inputText = ref('')
 const msgList = ref(null)
 const inputRef = ref(null)
+const imagesVisible = ref(true)
 
 const placeholder = computed(() => `跟${props.characterName}说点什么吧～`)
 
@@ -99,6 +120,13 @@ watch(() => props.messages.length, async () => {
   box-shadow: 0 2px 8px rgba(99,102,241,0.2);
 }
 .name { font-size: 16px; font-weight: 600; }
+.header-actions { display: flex; align-items: center; gap: 10px; }
+.image-visibility-btn {
+  border: 1px solid rgba(255,255,255,.42); border-radius: 6px;
+  padding: 4px 8px; background: rgba(255,255,255,.14); color: #fff;
+  font: inherit; font-size: 11px; cursor: pointer;
+}
+.image-visibility-btn:hover { background: rgba(255,255,255,.25); }
 .status { font-size: 12px; opacity: 0.8; }
 .status.online { color: #4ade80; }
 .messages { flex: 1; overflow-y: auto; padding: 16px; }
@@ -133,6 +161,18 @@ watch(() => props.messages.length, async () => {
   display: block; width: 100%; max-height: 520px;
   object-fit: contain; border-radius: 12px;
 }
+.image-hidden {
+  min-width: 150px; padding: 28px 18px; border-radius: 12px;
+  background: #f4f2fa; color: #867e98; font-size: 12px; text-align: center;
+}
+.regenerate-btn {
+  margin-top: 8px; padding: 5px 8px; border: 1px solid #ded6f2;
+  border-radius: 6px; background: #f7f4ff; color: #665589;
+  font: inherit; font-size: 11px; cursor: pointer;
+}
+.regenerate-btn:hover:not(:disabled) { background: #eee9ff; }
+.regenerate-btn:disabled { opacity: .58; cursor: wait; }
+.regenerate-error { margin-top: 6px; color: #b45309 !important; }
 .image-bubble p {
   margin-top: 6px; font-size: 12px; color: var(--text-light);
   white-space: pre-wrap;
