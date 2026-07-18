@@ -1,12 +1,12 @@
 {
-  "active_character": "xiaowen",
+  "active_character": "小古",
   "context": {
-    "max_tokens": 1000000,
-    "compress_at": 0.85
+    "max_tokens": 100000,
+    "compress_at": 0.75
   },
   "comfyui": {
     "root_dir": "D:\\ComfyUI",
-    "workflow": "waiNSFWIllustrious_v140.json",
+    "workflow": "ANIMA_workflow.json",
     "negative_prompt": "bad quality,worst quality,worst detail,sketch,censor",
     "sampler": null,
     "scheduler": null,

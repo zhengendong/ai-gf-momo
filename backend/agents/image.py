@@ -1,5 +1,6 @@
 """ComfyUI image generation pipeline."""
 
+import asyncio
 import logging
 from pathlib import Path
 
@@ -84,16 +85,21 @@ class ImagePipeline:
                 )
                 try:
                     from ..core.chat_history import append_chat_message
-                    append_chat_message(character, {
-                        "role": "assistant",
-                        "type": "image",
-                        "imageUrl": url,
-                        "content": "",
-                        "completed": True,
-                    })
+                    await asyncio.to_thread(
+                        append_chat_message,
+                        character,
+                        {
+                            "role": "assistant",
+                            "type": "image",
+                            "imageUrl": url,
+                            "content": "",
+                            "completed": True,
+                        },
+                    )
                 except Exception as e:
                     logger.warning("Failed to write image chat history for %s: %s", character, e)
-                self.tool.add_history(
+                await asyncio.to_thread(
+                    self.tool.add_history,
                     character,
                     prompt_used,
                     url,

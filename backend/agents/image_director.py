@@ -59,7 +59,10 @@ class VisualContinuityAgent:
                 "role_tags": expand_prompt_tags(visual_anchor.get("role_tags")),
                 "body_tags": expand_prompt_tags(visual_anchor.get("body_tags")),
                 "appearance_tags": expand_prompt_tags(visual_anchor.get("appearance_tags")),
-                "instruction": "role_tags 必须全部保留；body/appearance、最终服饰与场景由你按本图重点筛选。",
+                "instruction": (
+                    "role_tags、body_tags、appearance_tags 必须按原顺序完整保留；"
+                    "服饰与场景标签按本图重点筛选；动作和环境关系可用精简英文短语补充。"
+                ),
             },
         }
         last_error: Exception | None = None
@@ -85,9 +88,9 @@ class VisualContinuityAgent:
                 # Dry-run the exact patch before any user-visible reply or file write.
                 merged_state = merge_continuity_patch(previous_state, result.state_patch)
                 if result.shot_spec is not None:
-                    _validate_prompt_plan(
+                    result.shot_spec = self.normalize_prompt_plan(
                         result.shot_spec,
-                        visual_anchor=visual_anchor,
+                        visual_anchor,
                         merged_state=merged_state,
                     )
                 return result
@@ -128,6 +131,11 @@ class VisualContinuityAgent:
         if text.startswith("```"):
             lines = text.splitlines()
             text = "\n".join(lines[1:-1])
+        if not text.startswith("{"):
+            start = text.find("{")
+            end = text.rfind("}")
+            if start >= 0 and end > start:
+                text = text[start:end + 1]
         data = json.loads(text)
         if not isinstance(data, dict):
             raise ValueError("continuity output must be an object")
@@ -137,17 +145,82 @@ class VisualContinuityAgent:
 
         raw_shot = data.get("shot_spec")
         if image_goal:
-            if not isinstance(raw_shot, dict):
-                raise ValueError("image_goal requires shot_spec object")
-            shot_spec = _parse_shot(raw_shot)
+            # Prompt planning is outside the state transaction's safety
+            # boundary. Missing old-format fields degrade gracefully instead
+            # of cancelling the character reply and committed state.
+            shot_spec = _parse_shot(raw_shot if isinstance(raw_shot, dict) else {})
         else:
-            if raw_shot is not None:
-                raise ValueError("shot_spec must be null when image_goal is absent")
             shot_spec = None
         return ContinuityOutput(
             state_patch=state_patch,
             shot_spec=shot_spec,
             reason=str(data.get("reason") or "").strip(),
+        )
+
+    @staticmethod
+    def normalize_prompt_plan(
+        shot: dict[str, Any],
+        visual_anchor: dict[str, Any],
+        merged_state: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Normalize prompt facts without turning editorial errors into turn errors.
+
+        Character anchors and committed wardrobe/exposure facts are immutable.
+        Scene selection may only project committed facts. There is deliberately
+        no length budget.
+        """
+        completed = dict(shot)
+        for field in ("role_tags", "body_tags", "appearance_tags"):
+            required = expand_prompt_tags(visual_anchor.get(field))
+            completed[field] = required
+
+        wardrobe_candidates = wardrobe_visible_prompt_tags(merged_state.get("wardrobe") or {})
+        scene_candidates = list(merged_state.get("scene_tags") or [])
+        # Clothing and exposure are visual continuity facts, not optional
+        # camera decoration. A foot or facial close-up must not silently make
+        # a topless/nude character appear dressed again.
+        completed["wardrobe_tags"] = wardrobe_candidates
+        completed["scene_tags"] = _keep_committed_tags(
+            completed.get("scene_tags"),
+            scene_candidates,
+        )
+        if scene_candidates and not completed["scene_tags"]:
+            completed["scene_tags"] = scene_candidates[:2]
+        return completed
+
+    @staticmethod
+    def fallback_shot(
+        character: str,
+        image_goal: dict[str, Any],
+        committed_state: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Create a local image fallback without another model request.
+
+        This only runs after the director has already exhausted its one repair.
+        It intentionally preserves the last committed visual facts rather than
+        guessing unverified state changes from prose.
+        """
+        shot = {
+            "generate": True,
+            "reason": "local continuity fallback",
+            "role_tags": [],
+            "body_tags": [],
+            "appearance_tags": [],
+            "wardrobe_tags": [],
+            "scene_tags": [],
+            "action_tags": [],
+            "action_text": None,
+            "environment_text": None,
+            "pose": [],
+            "expression": [],
+            "camera": {"shot": "medium_shot", "angle": None, "focus": None, "pov": False},
+            "lighting": [],
+            "rating": str(image_goal.get("rating") or "general").removeprefix("rating:"),
+        }
+        return VisualContinuityAgent.normalize_prompt_plan(
+            shot,
+            get_visual_anchor_tags(character),
+            committed_state,
         )
 
     @staticmethod
@@ -200,37 +273,36 @@ def _parse_shot(data: dict[str, Any]) -> dict[str, Any]:
     camera = data.get("camera") if isinstance(data.get("camera"), dict) else {}
     shot = _optional_string(camera.get("shot"))
     focus = _optional_string(camera.get("focus"))
-    if bool(shot) == bool(focus):
-        raise ValueError("camera requires exactly one of shot or focus")
+    if focus:
+        shot = None
+    elif not shot:
+        shot = "medium_shot"
     rating = str(data.get("rating") or "general").removeprefix("rating:")
     if rating not in {"general", "sensitive", "nsfw"}:
         rating = "general"
-    action_tags = _bounded_string_list(data.get("action_tags"), "action_tags", 2)
-    if not action_tags:
-        raise ValueError("shot_spec requires one precise core action")
-    generic_actions = {
-        "standing", "sitting", "lying", "lying_down", "on_back",
-        "on_knees", "all_fours", "crouching", "squatting",
-    }
-    if _norm_tag(action_tags[0]) in generic_actions:
-        raise ValueError("action_tags[0] must be a visible action, not a generic pose")
+    action_tags = _string_list(data.get("action_tags"))
+    action_text = _optional_phrase(data.get("action_text"), max_words=25)
+    environment_text = _optional_phrase(data.get("environment_text"), max_words=18)
     return {
         "generate": True,
         "reason": str(data.get("reason") or "").strip(),
-        "role_tags": _bounded_string_list(data.get("role_tags"), "role_tags", 12),
-        "appearance_tags": _bounded_string_list(data.get("appearance_tags"), "appearance_tags", 5),
-        "wardrobe_tags": _bounded_string_list(data.get("wardrobe_tags"), "wardrobe_tags", 4),
-        "scene_tags": _bounded_string_list(data.get("scene_tags"), "scene_tags", 2),
+        "role_tags": _string_list(data.get("role_tags")),
+        "body_tags": _string_list(data.get("body_tags")),
+        "appearance_tags": _string_list(data.get("appearance_tags")),
+        "wardrobe_tags": _string_list(data.get("wardrobe_tags")),
+        "scene_tags": _string_list(data.get("scene_tags")),
         "action_tags": action_tags,
-        "pose": _bounded_string_list(data.get("pose"), "pose", 1),
-        "expression": _bounded_string_list(data.get("expression"), "expression", 1),
+        "action_text": action_text,
+        "environment_text": environment_text,
+        "pose": _string_list(data.get("pose")),
+        "expression": _string_list(data.get("expression")),
         "camera": {
             "shot": shot,
             "angle": _optional_string(camera.get("angle")),
             "focus": focus,
             "pov": bool(camera.get("pov", False)),
         },
-        "lighting": _bounded_string_list(data.get("lighting"), "lighting", 1),
+        "lighting": _string_list(data.get("lighting")),
         "rating": rating,
     }
 
@@ -248,70 +320,35 @@ def _string_list(value: Any) -> list[str]:
     return result
 
 
-def _bounded_string_list(value: Any, field: str, limit: int) -> list[str]:
-    result = _string_list(value)
-    if len(result) > limit:
-        raise ValueError(f"{field} exceeds the {limit}-tag budget")
-    return result
-
-
 def _optional_string(value: Any) -> str | None:
     item = str(value or "").strip()
     return item or None
+
+
+def _optional_phrase(value: Any, *, max_words: int) -> str | None:
+    if value is None:
+        return None
+    phrase = " ".join(str(value).split()).strip()
+    if not phrase:
+        return None
+    phrase = re.split(r"(?<=[.!?])\s+", phrase, maxsplit=1)[0]
+    words = phrase.split()
+    if len(words) > max_words:
+        phrase = " ".join(words[:max_words])
+    return phrase[:240].strip() or None
 
 
 def _norm_tag(value: Any) -> str:
     return str(value or "").strip().lower().replace(" ", "_")
 
 
-def _validate_prompt_plan(
-    shot: dict[str, Any],
-    *,
-    visual_anchor: dict[str, Any],
-    merged_state: dict[str, Any],
-) -> None:
-    """Ensure the director's final prompt plan only selects committed facts."""
-    required_roles = expand_prompt_tags(visual_anchor.get("role_tags"))
-    selected_roles = _string_list(shot.get("role_tags"))
-    if {_norm_tag(tag) for tag in selected_roles} != {_norm_tag(tag) for tag in required_roles}:
-        raise ValueError("role_tags must preserve every configured character role tag exactly")
-
-    appearance_candidates = [
-        *expand_prompt_tags(visual_anchor.get("body_tags")),
-        *expand_prompt_tags(visual_anchor.get("appearance_tags")),
+def _keep_committed_tags(selected: Any, candidates: list[str]) -> list[str]:
+    by_norm = {_norm_tag(tag): tag for tag in candidates}
+    return [
+        by_norm[_norm_tag(tag)]
+        for tag in _string_list(selected)
+        if _norm_tag(tag) in by_norm
     ]
-    wardrobe_candidates = wardrobe_visible_prompt_tags(merged_state.get("wardrobe") or {})
-    scene_candidates = list(merged_state.get("scene_tags") or [])
-    _require_subset("appearance_tags", shot.get("appearance_tags"), appearance_candidates)
-    _require_subset("wardrobe_tags", shot.get("wardrobe_tags"), wardrobe_candidates)
-    _require_subset("scene_tags", shot.get("scene_tags"), scene_candidates)
-    if scene_candidates and not _string_list(shot.get("scene_tags")):
-        raise ValueError("scene_tags must keep one or two scene-defining tags")
-
-    camera = shot.get("camera") if isinstance(shot.get("camera"), dict) else {}
-    planned = [
-        "masterpiece", "best quality", "amazing quality",
-        f"rating:{shot.get('rating') or 'general'}",
-        *selected_roles,
-        *_string_list(shot.get("appearance_tags")),
-        *_string_list(shot.get("wardrobe_tags")),
-        *[camera.get(key) for key in ("shot", "angle", "focus") if camera.get(key)],
-        *(["pov"] if camera.get("pov") else []),
-        *_string_list(shot.get("pose")),
-        *_string_list(shot.get("action_tags")),
-        *_string_list(shot.get("expression")),
-        *_string_list(shot.get("scene_tags")),
-        *_string_list(shot.get("lighting")),
-    ]
-    if len({_norm_tag(tag) for tag in planned if str(tag or "").strip()}) > 25:
-        raise ValueError("final prompt plan exceeds the 25-tag budget")
-
-
-def _require_subset(field: str, selected: Any, candidates: list[str]) -> None:
-    allowed = {_norm_tag(tag) for tag in candidates}
-    unknown = [tag for tag in _string_list(selected) if _norm_tag(tag) not in allowed]
-    if unknown:
-        raise ValueError(f"{field} contains tags outside committed candidates: {unknown}")
 
 
 # Compatibility import for code outside the runtime that still uses the old name.

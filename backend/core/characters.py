@@ -142,6 +142,8 @@ def delete_character(name: str):
             switch_character(remaining[0])
 
     _release_vector_locks()
+    from .memory_policy import clear_vector_store_cache
+    clear_vector_store_cache(name)
     if char_dir.exists():
         _remove_tree(char_dir)
     for path in [
@@ -179,6 +181,8 @@ def reset_character_memory(name: str):
     vector_dir = settings.get_vector_dir(name)
 
     _release_vector_locks()
+    from .memory_policy import clear_vector_store_cache
+    clear_vector_store_cache(name)
     if memory_dir.exists():
         _remove_tree(memory_dir)
     if images_dir.exists():

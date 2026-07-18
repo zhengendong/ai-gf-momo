@@ -20,11 +20,15 @@ from ..core.context import (
     get_user_pet_name,
 )
 from ..core.memory_policy import (
-    build_context_window,
     bump_turn_and_due_targets,
-    index_chat_pair,
+    commit_context_compression,
+    ContextCompressionPlan,
+    flush_pending_vector_writes,
+    has_pending_vector_writes,
     mark_condense_failed,
     memory_settings,
+    prepare_context_window,
+    queue_vector_chat_pair,
     recall_vector_context,
     reset_condense_counter,
 )
@@ -128,11 +132,17 @@ def _recent_visual_dialogue(
     session_lines: list[str],
     char_name: str,
     user_label: str,
+    persisted_messages: list[dict] | None = None,
 ) -> list[dict[str, str]]:
     """Return at most eight prior rounds without duplicating session history."""
+    source_messages = (
+        persisted_messages[-VISUAL_HISTORY_MESSAGES:]
+        if persisted_messages is not None
+        else read_chat_history(character, limit=VISUAL_HISTORY_MESSAGES, repair=False)
+    )
     messages = [
         {"role": str(item.get("role") or ""), "content": _clip_visual_history_content(item.get("content") or "")}
-        for item in read_chat_history(character, limit=VISUAL_HISTORY_MESSAGES)
+        for item in source_messages
         if item.get("role") in {"user", "assistant"}
         and item.get("type") in (None, "text")
         and str(item.get("content") or "").strip()
@@ -183,6 +193,8 @@ class AgentRuntime:
         self.chat_history_buffer: dict[tuple[str, str], list[str]] = {}
         self._character_locks: dict[str, asyncio.Lock] = {}
         self._memory_locks: dict[str, asyncio.Lock] = {}
+        self._context_compression_pending: set[str] = set()
+        self._vector_flush_pending: set[str] = set()
 
     def clear_session(self, session_id: str):
         for key in list(self.chat_history_buffer):
@@ -277,9 +289,10 @@ class AgentRuntime:
 
         try:
             history = self.chat_history_buffer.get(buffer_key, [])
+            persisted_history = read_chat_history(char, repair=False)
             recent_context = "\n".join(history[-6:])
             if not recent_context:
-                persisted = read_chat_history(char)[-6:]
+                persisted = persisted_history[-6:]
                 recent_context = "\n".join(
                     str(item.get("content") or "") for item in persisted
                 )
@@ -288,24 +301,35 @@ class AgentRuntime:
                 routing_content,
                 recent_context,
             )
-            base_prompt = assemble_momo_prompt(
-                char,
-                content,
-                business_knowledge=business_knowledge,
-                interaction_mode=interaction_mode,
-            )
+            # Context selection only needs a small seed; assemble the full
+            # Momo prompt once, after the history window is known.
+            base_prompt = content
+            system_prompt = self.momo_agent.system_prompt(char)
             context_started = time.perf_counter()
-            summary, chat_history = await build_context_window(
+            context_window = await prepare_context_window(
                 self.momo_agent.llm,
                 char,
                 char_name,
                 user_label,
                 base_prompt,
-                self.momo_agent.system_prompt(char),
+                system_prompt,
+                all_messages=persisted_history,
             )
+            summary = context_window.summary
+            chat_history = context_window.chat_history
+            context_compression_plan = context_window.compression_plan
             if not chat_history and history:
                 chat_history = "\n".join(history[-MAX_HISTORY_TURNS:])
             recalled_memories = recall_vector_context(char, routing_content)
+            prepared_prompt = assemble_momo_prompt(
+                char,
+                content,
+                chat_history=chat_history,
+                conversation_summary=summary,
+                recalled_memories=recalled_memories,
+                business_knowledge=business_knowledge,
+                interaction_mode=interaction_mode,
+            )
             logger.info(
                 "Runtime context ready: character=%s elapsed=%.3fs history_chars=%s",
                 char,
@@ -323,6 +347,7 @@ class AgentRuntime:
                 recalled_memories=recalled_memories,
                 business_knowledge=business_knowledge,
                 interaction_mode=interaction_mode,
+                prepared_prompt=prepared_prompt,
             )
             logger.info(
                 "Runtime main LLM done: character=%s elapsed=%.3fs",
@@ -353,9 +378,13 @@ class AgentRuntime:
                 history,
                 char_name,
                 user_label,
+                persisted_messages=persisted_history,
             )
             stage = "visual_continuity"
             continuity_started = time.perf_counter()
+            continuity = None
+            frozen_snapshot = previous_snapshot
+            wrote_runtime_state = False
             try:
                 continuity = await self.visual_continuity_agent.resolve(
                     character=char,
@@ -375,9 +404,11 @@ class AgentRuntime:
                     initialize=is_initial_scene,
                 )
             except (VisualContinuityError, TypeError, ValueError) as exc:
-                logger.error("Visual continuity failed for %s: %s", char, exc)
-                await self._send_turn_error(session_id, char, "本轮视觉状态同步失败，已取消本轮回复，请重新发送。")
-                return
+                logger.warning(
+                    "Visual continuity failed for %s; using local image fallback without another model call: %s",
+                    char,
+                    exc,
+                )
             logger.info(
                 "Runtime continuity done: character=%s elapsed=%.3fs changed=%s",
                 char,
@@ -386,11 +417,22 @@ class AgentRuntime:
             )
 
             stage = "image_job"
-            shot_spec = self.visual_continuity_agent.harmonize_shot(
-                continuity.shot_spec,
-                output.image_goal,
-                frozen_snapshot,
-            )
+            if continuity is None:
+                shot_spec = (
+                    self.visual_continuity_agent.fallback_shot(
+                        char,
+                        output.image_goal,
+                        frozen_snapshot,
+                    )
+                    if output.image_goal
+                    else None
+                )
+            else:
+                shot_spec = self.visual_continuity_agent.harmonize_shot(
+                    continuity.shot_spec,
+                    output.image_goal,
+                    frozen_snapshot,
+                )
             image_job = build_image_job(
                 char,
                 output.reply,
@@ -421,6 +463,14 @@ class AgentRuntime:
                 StreamChunk(type="text", content=output.reply),
                 character=char,
             )
+
+            # Submit the image task before low-priority persistence and memory
+            # work. The image task itself remains asynchronous and can run
+            # while ComfyUI is generating.
+            if image_job:
+                bg_tasks.schedule(
+                    self.image_pipeline.generate_job(session_id, image_job)
+                )
 
             memory_candidate = (
                 None
@@ -459,26 +509,12 @@ class AgentRuntime:
                     self._async_append_chat_history(char, content, output.reply)
                 )
             if memory_settings().get("vector_recall_enabled", True):
-                bg_tasks.schedule(
-                    self._async_index_vector_memory(char, persisted_user_text, output.reply)
-                )
-            due_condense_targets = bump_turn_and_due_targets(char)
-            if due_condense_targets:
-                target = "all" if len(due_condense_targets) > 1 else due_condense_targets[0]
-                bg_tasks.schedule(
-                    self._async_condense_memory(
-                        session_id,
-                        char,
-                        trigger="turn_interval",
-                        target=target,
-                    )
-                )
-
-            if image_job:
-                bg_tasks.schedule(
-                    self.image_pipeline.generate_job(session_id, image_job)
-                )
-            else:
+                self._schedule_vector_index(char, persisted_user_text, output.reply)
+            bg_tasks.schedule(
+                self._async_bump_and_schedule_condense(session_id, char)
+            )
+            self._schedule_context_compression(context_compression_plan)
+            if not image_job:
                 await self.sender.send_chunk(
                     session_id,
                     StreamChunk(type="image_status", content="done"),
@@ -514,7 +550,7 @@ class AgentRuntime:
             stage_messages = {
                 "context": "上下文准备失败，请重新发送。",
                 "momo": "角色回复生成失败，请重新发送。",
-                "visual_continuity": "视觉状态同步失败，请重新发送。",
+                "visual_continuity": "本轮内部处理异常，请重新发送。",
                 "image_job": "图片任务准备失败，请重新发送。",
                 "reply_delivery": "本轮回复发送失败，请重新发送。",
             }
@@ -598,6 +634,25 @@ class AgentRuntime:
     async def _async_apply_state_operations(self, character: str, operations: list[dict]):
         await asyncio.to_thread(apply_state_operations, character, operations)
 
+    async def _async_bump_and_schedule_condense(self, session_id: str, character: str):
+        try:
+            due_condense_targets = await asyncio.to_thread(
+                bump_turn_and_due_targets,
+                character,
+            )
+            if due_condense_targets:
+                target = "all" if len(due_condense_targets) > 1 else due_condense_targets[0]
+                bg_tasks.schedule(
+                    self._async_condense_memory(
+                        session_id,
+                        character,
+                        trigger="turn_interval",
+                        target=target,
+                    )
+                )
+        except Exception as e:
+            logger.error("Turn counter update failed for %s: %s", character, e)
+
     async def _async_update_state(
         self,
         character: str,
@@ -653,19 +708,19 @@ class AgentRuntime:
                 content = f"### {user_label}说：\n{user_msg}\n\n### {char_name}说：\n{reply}"
             if photo_prompt:
                 content += f"\n\n📷 {photo_prompt}"
-            append_daily_memory(character, content)
+            await asyncio.to_thread(append_daily_memory, character, content)
         except Exception as e:
             logger.error("Append daily memory failed for %s: %s", character, e)
 
     async def _async_append_chat_history(self, character: str, user_msg: str, reply: str):
         try:
-            append_chat_pair(character, user_msg, reply)
+            await asyncio.to_thread(append_chat_pair, character, user_msg, reply)
         except Exception as e:
             logger.error("Append chat_history failed for %s: %s", character, e)
 
     async def _async_append_scene_transition(self, character: str, reply: str):
         try:
-            append_scene_transition(character, reply)
+            await asyncio.to_thread(append_scene_transition, character, reply)
         except Exception as e:
             logger.error("Append scene transition failed for %s: %s", character, e)
 
@@ -676,15 +731,69 @@ class AgentRuntime:
         user_message: str = "",
     ):
         try:
-            append_initial_scene(character, reply, user_message)
+            await asyncio.to_thread(append_initial_scene, character, reply, user_message)
         except Exception as e:
             logger.error("Append initial scene failed for %s: %s", character, e)
 
-    async def _async_index_vector_memory(self, character: str, user_msg: str, reply: str):
+    def _schedule_vector_index(self, character: str, user_msg: str, reply: str):
+        if not queue_vector_chat_pair(character, user_msg, reply):
+            return
+        if character in self._vector_flush_pending:
+            return
+        self._vector_flush_pending.add(character)
+        bg_tasks.schedule(self._async_flush_vector_memory(character))
+
+    async def _async_flush_vector_memory(self, character: str):
+        flush_failed = False
         try:
-            index_chat_pair(character, user_msg, reply)
+            while True:
+                written = await asyncio.to_thread(flush_pending_vector_writes, character)
+                if written < 0:
+                    flush_failed = True
+                    break
+                if written == 0:
+                    break
         except Exception as e:
-            logger.error("Index vector memory failed for %s: %s", character, e)
+            flush_failed = True
+            logger.error("Vector memory flush failed for %s: %s", character, e)
+        finally:
+            self._vector_flush_pending.discard(character)
+            if not flush_failed and has_pending_vector_writes(character):
+                self._vector_flush_pending.add(character)
+                bg_tasks.schedule(self._async_flush_vector_memory(character))
+
+    def _schedule_context_compression(self, plan: ContextCompressionPlan | None):
+        """Queue at most one rolling-summary job per character."""
+        if plan is None or plan.character in self._context_compression_pending:
+            return
+        self._context_compression_pending.add(plan.character)
+        bg_tasks.schedule(self._async_compress_context(plan))
+
+    async def _async_compress_context(self, plan: ContextCompressionPlan):
+        try:
+            lock = self._memory_locks.setdefault(plan.character, asyncio.Lock())
+            async with lock:
+                summary = await self.memory_agent.compress_history(
+                    plan.old_summary,
+                    plan.turns_to_compress,
+                )
+            committed = await asyncio.to_thread(
+                commit_context_compression,
+                plan,
+                summary,
+            )
+            if committed:
+                logger.info(
+                    "Context summary advanced for %s by %s messages",
+                    plan.character,
+                    plan.message_count,
+                )
+            else:
+                logger.warning("Context summary was not advanced for %s", plan.character)
+        except Exception as exc:
+            logger.error("Context compression failed for %s: %s", plan.character, exc)
+        finally:
+            self._context_compression_pending.discard(plan.character)
 
     async def _async_condense_memory(
         self,
@@ -738,6 +847,9 @@ class AgentRuntime:
         ]
         if not targets:
             return
+        # soul.md and long_term.md are embedded in MomoAgent's cached system
+        # prompt. Invalidate it as soon as MemoryAgent changes either file.
+        self.momo_agent.reload_system_prompt(character)
         await self.sender.send_chunk(
             session_id,
             StreamChunk(type="memory_updated", content=",".join(targets)),

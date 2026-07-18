@@ -10,7 +10,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from backend.config import settings
-from backend.agents.image_director import _parse_shot
+from backend.agents.image_director import VisualContinuityAgent, _parse_shot
 from backend.core.business_knowledge import route_domains
 from backend.core.context import assemble_momo_prompt
 from backend.core.chat_history import read_chat_history, replace_chat_image_url, write_chat_history
@@ -24,7 +24,9 @@ from backend.core.state import (
     read_status,
     state_updates_from_effects,
 )
+from backend.core.wardrobe import wardrobe_from_tags
 from backend.services.prompt_builder import (
+    _compact_natural_phrase,
     build_image_prompt,
     expand_prompt_tags,
     normalize_camera_action_tags,
@@ -33,15 +35,35 @@ from backend.services.prompt_builder import (
 
 
 def main():
-    try:
-        _parse_shot({
-            "action_tags": ["presenting_foot"],
-            "camera": {"shot": "close-up", "angle": "front_view", "focus": "foot_focus"},
-        })
-    except ValueError as exc:
-        assert "exactly one of shot or focus" in str(exc)
-    else:
-        raise AssertionError("camera shot and focus must be mutually exclusive")
+    normalized_camera = _parse_shot({
+        "action_tags": ["presenting_foot"],
+        "camera": {"shot": "close-up", "angle": "front_view", "focus": "foot_focus"},
+    })
+    assert normalized_camera["camera"]["shot"] is None
+    assert normalized_camera["camera"]["focus"] == "foot_focus"
+    natural_only = _parse_shot({
+        "action_tags": [],
+        "action_text": "She reaches for the door handle with her right hand.",
+        "environment_text": "The half-open door leads into a quiet hallway.",
+        "camera": {"shot": "medium_shot", "angle": "from_side", "focus": None},
+    })
+    assert not natural_only["action_tags"]
+    assert natural_only["action_text"].startswith("She reaches")
+    assert natural_only["environment_text"].startswith("The half-open door")
+    assert len(_compact_natural_phrase("word " * 30, 25).split()) == 25
+    forced_wardrobe = VisualContinuityAgent.normalize_prompt_plan(
+        {
+            "role_tags": [], "body_tags": [], "appearance_tags": [],
+            "wardrobe_tags": [], "scene_tags": [], "action_tags": [],
+            "action_text": None, "environment_text": None, "pose": [],
+            "expression": [],
+            "camera": {"shot": "medium_shot", "angle": None, "focus": None, "pov": False},
+            "lighting": [], "rating": "general",
+        },
+        {"role_tags": ["1girl"], "body_tags": [], "appearance_tags": []},
+        {"wardrobe": wardrobe_from_tags(["topless", "blue_skirt", "barefoot"]), "scene_tags": []},
+    )
+    assert forced_wardrobe["wardrobe_tags"] == ["blue skirt", "topless", "barefoot"]
     assert route_domains("换套舒服的睡衣给我看看") == ["wardrobe", "photography"]
     assert route_domains("看一下") == ["photography"]
     assert route_domains("你还记得上次吗") == ["recall"]
@@ -91,19 +113,61 @@ def main():
 
             directed = build_image_prompt(char, "unused", shot_spec={
                 "role_tags": ["1girl", "solo"],
-                "appearance_tags": ["petite"],
+                "body_tags": ["petite"],
+                "appearance_tags": ["black_hair", "brown_eyes"],
                 "wardrobe_tags": [],
                 "scene_tags": ["living_room"],
                 "action_tags": ["presenting_breasts"],
+                "action_text": "She presents her chest clearly while facing the viewer.",
                 "pose": [],
                 "expression": ["blushing"],
                 "camera": {"shot": None, "angle": "front_view", "focus": "chest_focus"},
+                "environment_text": "She stands beside a sofa in the living room.",
                 "lighting": ["soft_lighting"],
                 "rating": "sensitive",
             })
-            assert "1girl" in directed and "petite" in directed
+            assert all(tag in directed for tag in ("1girl", "solo", "petite", "black_hair", "brown_eyes"))
             assert "white shirt" not in directed and "blue skirt" not in directed
-            assert len([tag for tag in directed.split(",") if tag.strip()]) <= 25
+            assert "She presents her chest clearly" in directed
+            assert "She stands beside a sofa" in directed
+
+            long_prompt = build_image_prompt(char, "unused", shot_spec={
+                "role_tags": ["1girl", "solo"],
+                "body_tags": ["petite"],
+                "appearance_tags": [f"stable_feature_{index}" for index in range(30)],
+                "wardrobe_tags": ["white shirt", "blue skirt"],
+                "scene_tags": ["living_room", "daytime"],
+                "action_tags": ["posing"],
+                "action_text": "She interacts naturally with the furniture while facing the viewer.",
+                "pose": ["standing"],
+                "expression": ["smile"],
+                "camera": {"shot": "medium_shot", "angle": "front_view", "focus": None},
+                "environment_text": "A sofa and window establish the occupied living space around her.",
+                "lighting": ["soft_lighting"],
+                "rating": "general",
+            })
+            assert "stable_feature_29" in long_prompt
+            assert len([unit for unit in long_prompt.split(",") if unit.strip()]) > 25
+
+            compacted = build_image_prompt(char, "unused", shot_spec={
+                "role_tags": ["1girl"], "body_tags": [], "appearance_tags": [],
+                "wardrobe_tags": ["white shirt"],
+                "scene_tags": [f"scene_detail_{index}" for index in range(45)],
+                "action_tags": ["posing"],
+                "action_text": "word " * 30,
+                "pose": ["standing"], "expression": ["smile"],
+                "camera": {"shot": "medium_shot", "angle": "front_view", "focus": None},
+                "environment_text": "place " * 25,
+                "lighting": ["soft_lighting"], "rating": "general",
+            })
+            compacted_units = [unit.strip() for unit in compacted.split(",") if unit.strip()]
+            # The director owns overall concision. Backend only keeps prose
+            # clauses bounded and must never truncate tags or reject a job.
+            assert len(compacted_units) > 40
+            assert "scene_detail_44" in compacted
+            assert "word word word word word" in compacted
+            assert "word " * 26 not in compacted
+            assert "place " * 19 not in compacted
 
             write_chat_history(char, [{
                 "role": "assistant",

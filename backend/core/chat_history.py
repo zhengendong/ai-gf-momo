@@ -31,7 +31,12 @@ def get_chat_history_path(character: str) -> Path:
     return settings.get_memory_dir(character) / "chat_history.json"
 
 
-def read_chat_history(character: str, limit: int | None = None) -> list[dict]:
+def read_chat_history(
+    character: str,
+    limit: int | None = None,
+    *,
+    repair: bool = True,
+) -> list[dict]:
     path = get_chat_history_path(character)
     if not path.exists():
         return []
@@ -46,10 +51,11 @@ def read_chat_history(character: str, limit: int | None = None) -> list[dict]:
     if not isinstance(messages, list):
         return []
 
-    repaired = repair_chat_history(character, messages)
-    if repaired != messages:
-        write_chat_history(character, repaired)
-        messages = repaired
+    if repair:
+        repaired = repair_chat_history(character, messages)
+        if repaired != messages:
+            write_chat_history(character, repaired)
+            messages = repaired
     return messages[-limit:] if limit else messages
 
 
@@ -88,17 +94,19 @@ def replace_chat_image_url(character: str, old_url: str, new_url: str) -> int:
 
 
 def append_chat_pair(character: str, user_text: str, assistant_text: str):
-    append_chat_message(character, {
+    messages = read_chat_history(character, repair=False)
+    messages.append(normalize_message({
         "role": "user",
         "type": "text",
         "content": user_text,
-    })
-    append_chat_message(character, {
+    }))
+    messages.append(normalize_message({
         "role": "assistant",
         "type": "text",
         "content": strip_photo_prompt_block(assistant_text),
         "completed": True,
-    })
+    }))
+    write_chat_history(character, messages)
 
 
 def append_scene_transition(character: str, assistant_text: str, label: str = "新场景"):

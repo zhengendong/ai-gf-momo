@@ -11,11 +11,12 @@
       <div v-if="activeTab === '通用'" class="tab-content">
         <div class="form-field">
           <label>上下文窗口 (K)</label>
-          <input v-model.number="contextWindowK" type="number" min="1" max="128" />
+          <input v-model.number="contextWindowK" type="number" min="8" max="1024" step="1" />
         </div>
         <div class="form-field">
           <label>压缩阈值</label>
-          <input v-model.number="settings.context.compress_at" type="number" step="0.1" min="0.5" max="0.95" />
+          <input v-model.number="settings.context.compress_at" type="number" step="0.05" min="0.5" max="0.95" />
+          <div class="field-hint">将在约 {{ compressionTriggerK }}K 时后台开始压缩，当前回复不会等待压缩完成。</div>
         </div>
         <button @click="saveGeneral" class="save-btn">保存设置</button>
       </div>
@@ -287,6 +288,12 @@ const contextWindowK = computed({
   set: (val) => { settings.context.max_tokens = Math.round(val * 1000) }
 })
 
+const compressionTriggerK = computed(() => {
+  const windowK = Number(contextWindowK.value) || 0
+  const ratio = Number(settings.context.compress_at) || 0
+  return Math.round(windowK * ratio * 10) / 10
+})
+
 const showSaved = () => {
   saved.value = true
   setTimeout(() => saved.value = false, 2000)
@@ -503,11 +510,19 @@ const saveSoul = async () => {
 }
 
 const saveGeneral = async () => {
-  await fetch(`${API}/settings`, {
+  const maxK = Math.min(1024, Math.max(8, Number(contextWindowK.value) || 16))
+  const compressAt = Math.min(0.95, Math.max(0.5, Number(settings.context.compress_at) || 0.85))
+  const context = {
+    max_tokens: Math.round(maxK * 1000),
+    compress_at: compressAt,
+  }
+  const response = await fetch(`${API}/settings`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ context: settings.context })
+    body: JSON.stringify({ context })
   })
+  if (!response.ok) return
+  Object.assign(settings.context, context)
   showSaved()
 }
 

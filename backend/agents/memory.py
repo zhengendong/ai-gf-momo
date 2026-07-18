@@ -15,7 +15,7 @@ from ..core.context import (
     load_identity,
     render_user_profile,
 )
-from ..core.compressor import strip_model_thinking
+from ..core.compressor import compress_conversation, strip_model_thinking
 from ..core.memory_v3 import chat_messages_for_days
 
 logger = logging.getLogger(__name__)
@@ -26,6 +26,10 @@ class MemoryAgent:
 
     def __init__(self, llm_client):
         self.llm = llm_client
+
+    async def compress_history(self, old_summary: str, turns_to_compress: str) -> str:
+        """Merge history leaving the full context window into its rolling summary."""
+        return await compress_conversation(self.llm, old_summary, turns_to_compress)
 
     async def evaluate_candidate(
         self,

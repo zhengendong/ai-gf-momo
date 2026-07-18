@@ -4,6 +4,7 @@
 """
 
 import json
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -83,10 +84,12 @@ def load_conversation_summary(character: str) -> str:
 
 
 def save_conversation_summary(character: str, summary: str):
-    """保存对话摘要"""
+    """Atomically project the current conversation summary to Markdown."""
     path = settings.get_memory_dir(character) / "conversation_summary.md"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(summary, encoding="utf-8")
+    temp = path.with_suffix(path.suffix + ".tmp")
+    temp.write_text(summary, encoding="utf-8")
+    os.replace(temp, path)
 
 
 def assemble_momo_prompt(
@@ -112,11 +115,22 @@ def assemble_momo_prompt(
         recalled_memories: 用户需要查找细节时从向量库召回的历史片段
     """
     status = load_status(character)
-    user_profile = render_user_profile(character)
-    user_pet_name = get_user_pet_name(character)
+    # Read the user profile once; rendering and the preferred form of address
+    # both come from the same object.
+    from .memory_v3 import load_user_profile as _load_user_profile
+    from .memory_v3 import render_user_profile as _render_user_profile
+    profile = _load_user_profile(character)
+    user_profile = _render_user_profile(profile)
+    user_pet_name = profile.get("user_pet_name") or "用户"
 
-    from .state import is_state_initialized
-    initialized = is_state_initialized(character)
+    # `status.md` is the readable projection while the snapshot is the
+    # structured initialization flag. Avoid calling is_state_initialized(),
+    # which would read both files again on every prompt assembly.
+    from .state import read_state_snapshot
+    state_snapshot = read_state_snapshot(character)
+    initialized = state_snapshot.get("initialized")
+    if initialized is None:
+        initialized = "未构建" not in status
     status_explanation = (
         "以下状态由上一轮 VisualContinuityAgent 还原并已提交。它不是猜测、建议或可选参考；"
         "服饰和场景事实不得被历史对话、记忆或角色惯性否认。角色回复必须从此状态继续，只能通过本轮明确发生的新动作改变它。"

@@ -25,6 +25,7 @@ from ..core.characters import (
 from ..services.llm import llm_service
 from ..core.outfit_state import normalize_outfit_tags
 from ..core.skin_mapping import search_skin_mappings
+from ..core.memory_policy import normalize_context_settings
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -42,7 +43,10 @@ class SettingsUpdate(BaseModel):
 async def get_settings():
     path = settings.settings_file
     if path.exists():
-        return json.loads(path.read_text(encoding="utf-8"))
+        current = json.loads(path.read_text(encoding="utf-8"))
+        if "context" in current:
+            current["context"] = normalize_context_settings(current.get("context"))
+        return current
     return {}
 
 
@@ -52,6 +56,8 @@ async def update_settings(updates: SettingsUpdate):
     current = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
     for key, val in updates.model_dump(exclude_none=True).items():
         if val is not None:
+            if key == "context":
+                val = normalize_context_settings(val)
             current[key] = val
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(current, ensure_ascii=False, indent=2), encoding="utf-8")

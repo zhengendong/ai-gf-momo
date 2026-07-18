@@ -61,6 +61,11 @@ def compile_image_intent(intent: dict[str, Any]) -> str:
     for key in ("pose", "action_tags", "expression", "lighting"):
         _extend(tags, intent.get(key))
 
+    for key in ("action_text", "environment_text"):
+        phrase = str(intent.get(key) or "").strip()
+        if phrase:
+            tags.append(phrase)
+
     camera = intent.get("camera") or {}
     if isinstance(camera, dict):
         for key in ("shot", "angle", "focus"):

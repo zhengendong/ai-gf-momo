@@ -2,6 +2,8 @@
 
 本文件是本仓库的开发记忆。修改代码前先阅读 [架构索引](docs/ARCHITECTURE_INDEX.md)，并遵守以下约束。
 
+项目级历史决策、已废弃方案和禁止重复引入的模块记录在 [项目级记忆](docs/PROJECT_MEMORY.md)。涉及架构、Agent、状态、对话或生图链路的修改，必须同时阅读该文件和架构索引。
+
 ## 修改边界
 
 - 先理解现有调用链和数据契约；不确定的业务语义先询问，不要凭空补设定。
@@ -12,9 +14,10 @@
 
 ## Agent / 状态 / 生图不变量
 
-- 正常对话路径包含一次主角色模型调用和一次 VisualContinuityAgent 调用：前者只负责角色回复与图片目标，后者每轮负责视觉状态解析，并在需要生图时同时设计镜头。连续性输出协议失败时允许原 Agent 修复一次；记忆审核继续走后台 MemoryAgent。
+- 正常对话路径包含一次主角色模型调用和一次 VisualContinuityAgent 调用：前者只负责角色回复与图片目标，后者每轮负责视觉状态解析，并在需要生图时同时设计镜头。连续性输出协议失败时仅允许原 Agent 修复一次；不得追加 state-only 或其他额外模型调用。两次仍失败时保持上轮已提交状态；若有图片目标，用该冻结状态构造本地基础镜头继续生图，不猜测未经验证的状态变化。记忆审核继续走后台 MemoryAgent。
 - `identity.md` 优先于记忆、检索结果和业务知识；业务知识只能补充常识、审美和连续性。
 - 向量召回与长期记忆写入是两条独立链路：召回只提供本轮参考；主 Agent 的 `memory_candidate` 仅是候选，必须由后台 MemoryAgent 二次审核后才能刷新 `long_term.md`。不要混用两者的规则或数据。
+- 长期上下文由窗口内完整对话、窗口外 `conversation_summary.md` 连续剧情摘要、`long_term.md` 稳定事实和按需向量细节召回共同组成。达到 `context.compress_at` 时由 MemoryAgent 在后台滚动合并摘要，不得阻塞当前回复；摘要和游标必须同一事务推进，且每个角色只能有一个在途压缩任务。
 - 主 Agent 只输出 `reply`、可选高层 `image_goal`、`memory_candidate` 和 `persist_context`；不要让它输出状态操作，也不要让它拼人物外貌、服饰状态投影、场景、镜头标签、质量或负面提示词。VisualContinuityAgent 根据此前最多 8 轮对话、当前用户输入、角色实际回复和上一轮快照输出 `state_patch`，有图片目标时再输出 `shot_spec`；最近剧情只能帮助理解承接，不能覆盖快照。旧 `state_ops/effects/image_intent/photo_prompt/state_updates` 只作为兼容结构保留，不进入正常运行时链路。
 - “下一幕”自动/手动构建使用独立 `scene_transition` WebSocket 消息，但仍走 MomoAgent → VisualContinuityAgent → 状态提交的正常事务。预设指令不得作为用户台词或普通聊天记录持久化；成功后持久化 `scene_divider` 历史事件供前端显示，默认不强制生图。
 - 新角色和清空记录后的角色必须处于显式 `initialized=false` 的“未构建”状态，不得把它解释为裸体、空场景或默认服饰。持久化初始场景模板存于 `profile.json.initial_scene`，编辑模板不改变当前剧情，清空记录不删除模板。主动构建开场或第一条用户消息自动触发开场时，仍走 MomoAgent → VisualContinuityAgent → 状态提交；只有完整服饰槽位和时间/地点场景提交成功后才置为已初始化。模板只保持事实约束，不要求每次复刻服饰措辞、动作或旁白。内部开场指令不写入聊天记录，成功后持久化“故事开始”分割线。
@@ -22,7 +25,7 @@
 - 心情不属于持久化状态：不得写入 `status.md` 或 `state_snapshot.json`，前端状态栏也不展示；情绪和表情从上下文与当前回复理解。
 - 故事运行在独立虚拟时空中；真实系统时间不得注入 Agent、影响剧情或参与状态判断。聊天记录自身的技术时间戳可以保留，但不得作为故事时间输入。
 - MemoryAgent 不得接收现实日期、时钟或聊天技术时间；技术日期只可在后台用于读取窗口与调度。重要里程碑只能依据对话明确的故事时间和已发生的故事先后整理，不得补写现实日期。
-- VisualContinuityAgent 的提示词知识来自蒸馏后的 `config/knowledge/visual_prompting.md`，不要把 `data/pxlsan-标签选择器-完整内容.xlsx` 整表注入上下文。它是每张图最终提示词的总编辑：输入完整 `role/body/appearance` 候选及服饰、场景状态，完整保留角色 `role_tags`，主动筛选其他外貌、服饰和场景，再设计动作与镜头。正常图片任务只序列化其 ShotSpec 选择，不得由后端重新注入全部候选。构图中的景别与部位焦点必须二选一，角度可独立保留一个；明确看某部位时只用 `xx_focus`，无特指部位时才用 `medium_shot/full_shot` 等景别。场景只保留 1 至 2 个关键标签，最终提示词含质量词与 rating 在内不得超过 25 个标签。禁止生成任何数值权重；局部特写直接忽略画面外或干扰主体的候选标签。
+- VisualContinuityAgent 的提示词知识来自蒸馏后的 `config/knowledge/visual_prompting.md`，不要把 `data/pxlsan-标签选择器-完整内容.xlsx` 整表注入上下文。它是每张图最终提示词的总编辑：输入完整 `role/body/appearance` 候选及服饰、场景状态，按原顺序完整保留人物 `role/body/appearance` 锚点和当前实际服饰/裸露事实；只主动筛选场景，再设计动作与镜头。正常图片任务只序列化其 ShotSpec 选择，不得由后端重新注入全部候选。构图中的景别与部位焦点必须二选一，角度可独立保留一个；明确看某部位时只用 `xx_focus`，无特指部位时才用 `medium_shot/full_shot` 等景别。动作姿势和环境允许各用一段精简英文自然语言补充标签难以表达的交互与空间关系；动作句目标不超过 25 英文词、环境句目标不超过 18 英文词，超长自动压缩而不报错。最终提示词以约 40 个语义单元为 SDXL 编辑目标，不由后端按数量截断；长度不得成为取消图片或对话的原因。禁止生成任何数值权重；局部特写不得忽略实际服饰或裸露事实。
 - 状态变化必须先提交，再创建 ImageJob。图片、回复和状态不一致时，宁可不生图，也不要生成错误图片。
 - 生图工作流、模型和可选覆盖参数由后端读取 `config/settings.json` 的全局 `comfyui` 配置；`root_dir` 是本地 ComfyUI 根目录，工作流从 `<root_dir>/ComfyUI/user/default/workflows` 读取。主 Agent 只输出画面意图，不选择工作流或模型。前端空值表示继承所选工作流节点的默认值，只有明确填写的值才可覆盖。复杂工作流的受控节点由 `config/workflow_adapters/<workflow-stem>.json` 声明；有映射时只能修改映射节点，不能再按类型批量覆盖。
 - ComfyUI 生图使用同一 `client_id` 的 `/ws` 完成事件等待，不得恢复为固定间隔轮询 `/history`。完成事件后只读取一次 `/history/{prompt_id}` 获取输出元数据，再通过 `/view` 下载最终图片；二进制预览帧不改变当前前端展示。
@@ -37,6 +40,8 @@
   - `py scripts/wardrobe_layer_probe.py`
   - `py scripts/turn_transaction_probe.py`
   - `py scripts/memory_candidate_probe.py`
+  - `py scripts/context_compression_probe.py`
+  - `py scripts/performance_cache_probe.py`
   - `py scripts/runtime_conversation_probe.py`
   - `py scripts/workflow_adapter_probe.py`
   - `py scripts/comfyui_transport_probe.py`

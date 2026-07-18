@@ -60,7 +60,7 @@ class VectorStore:
         """
         self._ensure_init()
         if self._collection is None:
-            return
+            return False
 
         try:
             import uuid
@@ -85,8 +85,10 @@ class VectorStore:
                 ids=ids,
             )
             logger.info(f"向量存储: 添加 {len(documents)} 条记录")
+            return True
         except Exception as e:
             logger.error(f"向量存储添加失败: {e}")
+            return False
 
     def query(self, text: str, top_k: int = 5) -> list[dict]:
         """

@@ -86,6 +86,7 @@ class MomoAgent:
         recalled_memories: str = "",
         business_knowledge: str = "",
         interaction_mode: str = "chat",
+        prepared_prompt: str | None = None,
     ) -> AgentOutput:
         """
         处理用户消息
@@ -103,7 +104,7 @@ class MomoAgent:
         system_prompt = self.system_prompt(character)
 
         # 1. 检查上下文窗口
-        prompt = assemble_momo_prompt(
+        prompt = prepared_prompt or assemble_momo_prompt(
             character, user_message,
             chat_history=chat_history,
             conversation_summary=conversation_summary,
@@ -116,15 +117,16 @@ class MomoAgent:
         # 2. build_context_window already trims recent history before this point.
         # Do not run another LLM summarization in the live reply path.
         if needs_compression(total_tokens):
-            logger.warning(f"上下文接近上限 ({total_tokens} tokens)，本轮裁掉最近对话以避免同步压缩")
-            prompt = assemble_momo_prompt(
-                character, user_message,
-                chat_history="",
-                conversation_summary=conversation_summary,
-                recalled_memories=recalled_memories,
-                business_knowledge=business_knowledge,
-                interaction_mode=interaction_mode,
-            )
+            logger.warning(f"上下文接近上限 ({total_tokens} tokens)，历史压缩由后台任务处理")
+            if prepared_prompt is None:
+                prompt = assemble_momo_prompt(
+                    character, user_message,
+                    chat_history="",
+                    conversation_summary=conversation_summary,
+                    recalled_memories=recalled_memories,
+                    business_knowledge=business_knowledge,
+                    interaction_mode=interaction_mode,
+                )
 
         # 3. 调用 LLM
         try:

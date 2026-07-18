@@ -60,10 +60,12 @@ async def main():
                     "shot_spec": {
                         "reason": "清楚展示已完成的变化",
                         "role_tags": ["1girl", "solo"],
-                        "appearance_tags": [],
+                        "body_tags": ["petite"],
+                        "appearance_tags": ["black_hair", "brown_eyes"],
                         "wardrobe_tags": ["white thighhighs"],
                         "scene_tags": ["bedroom"],
                         "action_tags": ["showing_feet"],
+                        "action_text": "She extends both feet toward the viewer after removing her shoes.",
                         "pose": ["sitting_on_bed"],
                         "expression": ["looking_at_viewer"],
                         "camera": {
@@ -72,6 +74,7 @@ async def main():
                             "focus": "foot_focus",
                             "pov": False,
                         },
+                        "environment_text": "She sits at the edge of a bed with the floor below.",
                         "lighting": ["warm_lighting"],
                         "rating": "general",
                     },
@@ -104,10 +107,11 @@ async def main():
             assert "black_mary_jane_shoes" not in prompt
             assert "white thighhighs" in prompt
             assert "barefoot" not in prompt
-            assert "white shirt" not in prompt and "black pleated skirt" not in prompt
-            assert "petite" not in prompt and "black hair" not in prompt
+            assert "white shirt" in prompt and "black pleated skirt" in prompt
+            assert "petite" in prompt and "black_hair" in prompt and "brown_eyes" in prompt
+            assert "She extends both feet toward the viewer" in prompt
+            assert "She sits at the edge of a bed" in prompt
             assert ":0.9" not in prompt and ":1.1" not in prompt
-            assert len([tag for tag in prompt.split(",") if tag.strip()]) <= 25
 
             refusal_llm = FakeLLM([
                 {
@@ -130,26 +134,39 @@ async def main():
             assert len(refusal_llm.calls) == 2, "continuity runs even when no image is requested"
             assert not any(chunk.type == "image" for chunk in refusal_sender.chunks)
 
-            # If continuity cannot produce a valid patch after its one repair,
-            # the role reply is withheld instead of being replaced by an
-            # immersion-breaking character sentence.
+            # Prompt-planning failure recovers through a state-only director
+            # call; it must still deliver the reply and requested image.
             before_failure = read_state_snapshot(CHARACTER)
             failure_llm = FakeLLM([
                 {
-                    "reply": "我已经换好了。",
-                    "image_goal": None,
+                    "reply": "我站到你面前，让你看清楚。",
+                    "image_goal": {
+                        "required": True,
+                        "purpose": "展示角色",
+                        "subject": "角色当前姿态",
+                        "visibility": "clear",
+                        "rating": "general",
+                    },
                     "memory_candidate": None,
                     "persist_context": True,
                 },
                 "not-json",
                 "still-not-json",
+                {
+                    "reason": "状态没有变化。",
+                    "state_patch": {"wardrobe": {}, "scene": None},
+                    "shot_spec": None,
+                },
             ])
             failure_sender = CapturingSender()
             failure_runtime = AgentRuntime(failure_llm, FakeComfy(), failure_sender)
             await failure_runtime.handle_message("failure_session", CHARACTER, "换好了吗")
             assert read_state_snapshot(CHARACTER) == before_failure
-            assert not any(chunk.type == "text" for chunk in failure_sender.chunks)
-            assert any(
+            if bg_tasks.active_count:
+                await asyncio.gather(*list(bg_tasks._tasks), return_exceptions=False)
+            assert any(chunk.type == "text" for chunk in failure_sender.chunks)
+            assert any(chunk.type == "image" for chunk in failure_sender.chunks)
+            assert not any(
                 chunk.type == "status_update" and "状态同步失败" in (chunk.content or "")
                 for chunk in failure_sender.chunks
             )

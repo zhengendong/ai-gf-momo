@@ -150,7 +150,11 @@ QUALITY_TAGS = (
     "amazing quality",
 )
 
-MAX_FINAL_PROMPT_TAGS = 25
+# Keep the two natural-language clauses short locally. Overall prompt
+# concision remains the director's editorial responsibility, never a backend
+# admission rule or a reason to trim state facts.
+ACTION_TEXT_MAX_WORDS = 25
+ENVIRONMENT_TEXT_MAX_WORDS = 18
 
 LOCAL_DETAIL_FOCUS = {
     "pussy_focus",
@@ -709,39 +713,50 @@ def _build_directed_prompt(shot: dict) -> str:
     """Serialize the director-owned final prompt plan in stable priority order."""
     camera = shot.get("camera") if isinstance(shot.get("camera"), dict) else {}
     rating = str(shot.get("rating") or "general").removeprefix("rating:")
-    ordered = [
+    mandatory = [
         *QUALITY_TAGS,
         f"rating:{rating}",
         *expand_prompt_tags(shot.get("role_tags")),
+        *expand_prompt_tags(shot.get("body_tags")),
         *expand_prompt_tags(shot.get("appearance_tags")),
         *expand_prompt_tags(shot.get("wardrobe_tags")),
+    ]
+    composition = [
         *[str(camera.get(key)).strip() for key in ("shot", "angle", "focus") if camera.get(key)],
         *(["pov"] if camera.get("pov") else []),
         *expand_prompt_tags(shot.get("pose")),
         *expand_prompt_tags(shot.get("action_tags")),
         *expand_prompt_tags(shot.get("expression")),
+        *([_compact_natural_phrase(shot.get("action_text"), ACTION_TEXT_MAX_WORDS)] if shot.get("action_text") else []),
+    ]
+    optional_environment = [
         *expand_prompt_tags(shot.get("scene_tags")),
+        *([_compact_natural_phrase(shot.get("environment_text"), ENVIRONMENT_TEXT_MAX_WORDS)] if shot.get("environment_text") else []),
         *expand_prompt_tags(shot.get("lighting")),
     ]
-    final_tags = _dedupe_tags(ordered)
-    if _has_explicit_nudity(final_tags):
-        final_tags = [
+    final_units = _dedupe_tags([*mandatory, *composition, *optional_environment])
+    if _has_explicit_nudity(final_units):
+        final_units = [
             "rating:nsfw" if _is_rating_tag(tag) else tag
-            for tag in final_tags
+            for tag in final_units
         ]
-    if len(final_tags) > MAX_FINAL_PROMPT_TAGS:
-        raise ValueError(
-            f"director prompt exceeds {MAX_FINAL_PROMPT_TAGS} tags: {len(final_tags)}"
-        )
-    final_prompt = ", ".join(final_tags)
-    logger.info("导演最终 prompt 已构建: %s tags", len(final_tags))
+    final_prompt = ", ".join(final_units)
+    logger.info("导演最终 prompt 已构建: %s units", len(final_units))
     return final_prompt
 
 
+def _compact_natural_phrase(value, max_words: int) -> str:
+    """Normalize one prose clause; never raise or block an image."""
+    phrase = " ".join(str(value or "").split()).strip()
+    if not phrase:
+        return ""
+    first_sentence = re.split(r"(?<=[.!?])\s+", phrase, maxsplit=1)[0]
+    words = first_sentence.split()
+    if len(words) > max_words:
+        first_sentence = " ".join(words[:max_words])
+    return first_sentence[:240].strip()
+
+
 def _cap_prompt_tags(prompt: str) -> str:
-    """Compatibility-only hard cap; director plans are rejected instead."""
-    tags = _dedupe_tags(_split_prompt_tags(prompt))
-    if len(tags) > MAX_FINAL_PROMPT_TAGS:
-        logger.warning("兼容 prompt 超过 %s 标签，已按优先顺序截断", MAX_FINAL_PROMPT_TAGS)
-        tags = tags[:MAX_FINAL_PROMPT_TAGS]
-    return ", ".join(tags)
+    """Compatibility-only normalization; prompt length is never truncated."""
+    return ", ".join(_dedupe_tags(_split_prompt_tags(prompt)))
