@@ -52,8 +52,6 @@ async def lifespan(app: FastAPI):
     # 确保数据目录存在
     for dir_path in [settings.data_dir, settings.characters_dir]:
         dir_path.mkdir(parents=True, exist_ok=True)
-    from .core.characters import migrate_all_character_assets
-    migrate_all_character_assets()
 
     # 迁移 api_key 从 profile 到 provider 存储，并清理 profile 内的旧 key。
     from .services.llm_profiles import _migrate_api_keys_to_provider_store

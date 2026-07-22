@@ -25,7 +25,7 @@ async def main():
     image_tool = ImageTool(comfyui_service)
     workflow, prompt = image_tool.build_workflow(
         character=character,
-        prompt="rating:general, 1girl, solo, smile",
+        prompt="1girl, solo, smile",
         width=1024,
         height=1024,
     )

@@ -158,6 +158,7 @@ const onRegenerateImage = async (imageUrl) => {
 async function onCharacterRecordsCleared(event) {
   if (event.detail?.character !== activeCharId.value) return
   isLoading.value = false
+  imageHistoryRefreshToken.value += 1
   await loadHistory(activeCharId.value)
   syncCharacter(activeCharId.value)
 }

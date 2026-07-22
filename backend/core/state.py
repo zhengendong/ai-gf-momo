@@ -266,14 +266,17 @@ def merge_continuity_patch(state_snapshot: dict, state_patch: dict | None) -> di
     scene_tags = list(previous.get("scene_tags") or [])
     scene_patch = state_patch.get("scene")
     if scene_patch is not None:
-        if not isinstance(scene_patch, dict):
-            raise ValueError("scene patch must be an object or null")
-        mode = str(scene_patch.get("mode") or "replace").strip().lower()
-        if mode != "replace":
-            raise ValueError(f"unsupported scene patch mode: {mode}")
-        raw_tags = scene_patch.get("tags")
-        if not isinstance(raw_tags, list):
-            raise ValueError("scene replace patch requires a tags array")
+        if isinstance(scene_patch, list):
+            raw_tags = scene_patch
+        elif isinstance(scene_patch, dict):
+            mode = str(scene_patch.get("mode") or "replace").strip().lower()
+            if mode != "replace":
+                raise ValueError(f"unsupported scene patch mode: {mode}")
+            raw_tags = scene_patch.get("tags")
+            if not isinstance(raw_tags, list):
+                raise ValueError("scene replace patch requires a tags array")
+        else:
+            raise ValueError("scene patch must be a tag array, object, or null")
         scene_tags = _normalize_state_tags(raw_tags)
         if len(scene_tags) > 4:
             raise ValueError("scene replace patch exceeds the 4-tag budget")
@@ -383,7 +386,12 @@ def validate_initial_state_patch(state_patch: dict | None):
     if missing:
         raise ValueError(f"初始场景缺少完整服饰槽位: {', '.join(sorted(missing))}")
     scene_patch = state_patch.get("scene")
-    if not isinstance(scene_patch, dict) or not scene_patch.get("tags"):
+    scene_tags = (
+        scene_patch
+        if isinstance(scene_patch, list)
+        else scene_patch.get("tags") if isinstance(scene_patch, dict) else None
+    )
+    if not isinstance(scene_tags, list) or not scene_tags:
         raise ValueError("初始场景必须明确时间和地点")
 
 

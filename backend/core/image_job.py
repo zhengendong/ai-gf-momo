@@ -55,23 +55,35 @@ def build_image_job(
 def compile_image_intent(intent: dict[str, Any]) -> str:
     """Compile a semantic shot brief; persistent state is injected later."""
     tags: list[str] = []
-    rating = str(intent.get("rating") or "general").removeprefix("rating:")
-    tags.append(f"rating:{rating}")
-
-    for key in ("pose", "action_tags", "expression", "lighting"):
-        _extend(tags, intent.get(key))
-
-    for key in ("action_text", "environment_text"):
-        phrase = str(intent.get(key) or "").strip()
-        if phrase:
-            tags.append(phrase)
-
     camera = intent.get("camera") or {}
     if isinstance(camera, dict):
-        for key in ("shot", "angle", "focus"):
+        for key in ("view", "shot", "angle", "focus"):
             _extend(tags, camera.get(key))
         if camera.get("pov"):
             tags.append("pov")
+
+    action = intent.get("action")
+    if isinstance(action, dict):
+        _extend(tags, action.get("tags"))
+        phrase = str(action.get("text") or "").strip()
+        if phrase:
+            tags.append(phrase)
+    else:
+        for key in ("pose", "action_tags", "expression"):
+            _extend(tags, intent.get(key))
+        phrase = str(intent.get("action_text") or "").strip()
+        if phrase:
+            tags.append(phrase)
+
+    environment = str(intent.get("environment") or "").strip()
+    if environment:
+        tags.append(environment)
+    else:
+        _extend(tags, intent.get("scene_tags"))
+        phrase = str(intent.get("environment_text") or "").strip()
+        if phrase:
+            tags.append(phrase)
+        _extend(tags, intent.get("lighting"))
 
     return ", ".join(_dedupe(tags))
 

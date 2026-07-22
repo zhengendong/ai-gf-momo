@@ -7,7 +7,7 @@ const characters = ref([])
 const activeCharId = ref('')
 const profile = reactive({
   name: '',
-  gender: 'female',
+  gender: '',
   avatar: '',
   initial_outfit_tags: '',
   initial_scene: {
@@ -25,7 +25,7 @@ const loading = ref(false)
 
 const emptyProfile = () => ({
   name: '',
-  gender: 'female',
+  gender: '',
   avatar: '',
   initial_outfit_tags: '',
   initial_scene: {

@@ -70,23 +70,11 @@ class AppConfig(BaseSettings):
         return self.base_dir / "characters"
 
     @property
-    def legacy_characters_dir(self) -> Path:
-        return self.config_dir / "characters"
-
-    @property
     def memory_dir(self) -> Path:
         return self.base_dir / "characters"
 
     @property
-    def legacy_memory_dir(self) -> Path:
-        return self.base_dir / "memory"
-
-    @property
     def data_dir(self) -> Path:
-        return self.base_dir / "data"
-
-    @property
-    def legacy_data_dir(self) -> Path:
         return self.base_dir / "data"
 
     @property

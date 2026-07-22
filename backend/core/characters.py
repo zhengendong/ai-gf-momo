@@ -37,7 +37,6 @@ def normalize_initial_scene(value=None) -> dict:
 
 def list_characters() -> list[str]:
     """列出所有角色"""
-    migrate_all_character_assets()
     chars_dir = settings.characters_dir
     if not chars_dir.exists():
         return []
@@ -52,7 +51,6 @@ def get_active() -> str:
 
 def switch_character(name: str):
     """切换激活角色"""
-    migrate_character_assets(name)
     chars_dir = settings.characters_dir
     char_dir = chars_dir / name
     if not char_dir.exists():
@@ -75,7 +73,7 @@ def create_character(name: str, profile: dict):
 
     # profile.json 是“皮肤”文件，皮肤信息只落进 visual_anchor（不重复存平铺字段）。
     skin_keys = {"name", "avatar", "gender", "visual_anchor", "initial_outfit_tags", "initial_scene"}
-    default_profile = {"name": name, "avatar": "💕"}
+    default_profile = {"name": name, "avatar": "💕", "gender": ""}
     for k, v in profile.items():
         if k in skin_keys:
             default_profile[k] = v
@@ -131,7 +129,6 @@ def _default_soul(display_name: str) -> str:
 
 def delete_character(name: str):
     """Delete a character's config, memory, and generated data."""
-    migrate_character_assets(name)
     char_dir = settings.get_character_dir(name)
     if not char_dir.exists():
         raise ValueError(f"角色 '{name}' 不存在")
@@ -146,19 +143,11 @@ def delete_character(name: str):
     clear_vector_store_cache(name)
     if char_dir.exists():
         _remove_tree(char_dir)
-    for path in [
-        settings.legacy_characters_dir / name,
-        settings.legacy_memory_dir / name,
-        settings.legacy_data_dir / name,
-    ]:
-        if path.exists():
-            _remove_tree(path)
     logger.info("角色 '%s' 已删除", name)
 
 
 def clear_character_records(name: str):
     """Clear runtime records while keeping profile and identity files."""
-    migrate_character_assets(name)
     if not settings.get_character_dir(name).exists():
         raise ValueError(f"角色 '{name}' 不存在")
 
@@ -208,7 +197,6 @@ def reset_character_memory(name: str):
 
 def get_profile(name: str) -> dict:
     """获取角色 profile"""
-    migrate_character_assets(name)
     path = settings.get_character_dir(name) / "profile.json"
     if not path.exists():
         raise ValueError(f"角色 '{name}' 不存在")
@@ -234,101 +222,6 @@ def update_profile(name: str, updates: dict):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(profile, f, ensure_ascii=False, indent=2)
     logger.info(f"角色 '{name}' profile 已更新")
-
-
-def migrate_all_character_assets():
-    """Move legacy split character assets into characters/{id}/."""
-    names = set()
-    for base in (
-        settings.legacy_characters_dir,
-        settings.legacy_memory_dir,
-        settings.legacy_data_dir,
-        settings.characters_dir,
-    ):
-        if base.exists():
-            names.update(d.name for d in base.iterdir() if d.is_dir())
-    for name in sorted(names):
-        migrate_character_assets(name)
-
-
-def migrate_character_assets(name: str):
-    """Migrate one character from legacy config/memory/data folders."""
-    dst = settings.get_character_dir(name)
-    legacy_config = settings.legacy_characters_dir / name
-    legacy_memory = settings.legacy_memory_dir / name
-    legacy_data = settings.legacy_data_dir / name
-
-    dst.mkdir(parents=True, exist_ok=True)
-    memory_dst = settings.get_memory_dir(name)
-    images_dst = settings.get_images_dir(name)
-    vector_dst = settings.get_vector_dir(name)
-    memory_dst.mkdir(parents=True, exist_ok=True)
-    images_dst.mkdir(parents=True, exist_ok=True)
-    vector_dst.parent.mkdir(parents=True, exist_ok=True)
-
-    if not any(p.exists() for p in (legacy_config, legacy_memory, legacy_data)):
-        return
-
-    if legacy_config.exists():
-        _move_children(legacy_config, dst)
-        _remove_empty_dir(legacy_config)
-
-    if legacy_memory.exists():
-        memory_dst.mkdir(parents=True, exist_ok=True)
-        _move_children(legacy_memory, memory_dst)
-        _remove_empty_dir(legacy_memory)
-
-    if legacy_data.exists():
-        images_src = legacy_data / "images"
-        chroma_src = legacy_data / "chroma_db"
-        if images_src.exists():
-            images_dst.mkdir(parents=True, exist_ok=True)
-            _move_children(images_src, images_dst)
-            _remove_empty_dir(images_src)
-        if chroma_src.exists():
-            vector_dst.mkdir(parents=True, exist_ok=True)
-            _move_children(chroma_src, vector_dst)
-            _remove_empty_dir(chroma_src)
-        _move_non_asset_children(legacy_data, dst / "data")
-        _remove_empty_dir(legacy_data)
-
-
-def _move_children(src: Path, dst: Path):
-    dst.mkdir(parents=True, exist_ok=True)
-    for item in list(src.iterdir()):
-        target = dst / item.name
-        if target.exists():
-            if item.is_dir():
-                _move_children(item, target)
-                _remove_empty_dir(item)
-            else:
-                item.unlink(missing_ok=True)
-            continue
-        shutil.move(str(item), str(target))
-
-
-def _move_non_asset_children(src: Path, dst: Path):
-    for item in list(src.iterdir()):
-        if item.name in {"images", "chroma_db"}:
-            continue
-        dst.mkdir(parents=True, exist_ok=True)
-        target = dst / item.name
-        if target.exists():
-            if item.is_dir():
-                _move_children(item, target)
-                _remove_empty_dir(item)
-            else:
-                item.unlink(missing_ok=True)
-        else:
-            shutil.move(str(item), str(target))
-
-
-def _remove_empty_dir(path: Path):
-    try:
-        if path.exists() and path.is_dir() and not any(path.iterdir()):
-            path.rmdir()
-    except Exception:
-        pass
 
 
 def _release_vector_locks():

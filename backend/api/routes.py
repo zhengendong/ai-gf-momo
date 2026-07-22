@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import re
+from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -17,7 +18,6 @@ from ..core.characters import (
     get_active,
     get_profile,
     list_characters,
-    migrate_character_assets,
     reset_character_memory,
     switch_character,
     update_profile,
@@ -26,6 +26,7 @@ from ..services.llm import llm_service
 from ..core.outfit_state import normalize_outfit_tags
 from ..core.skin_mapping import search_skin_mappings
 from ..core.memory_policy import normalize_context_settings
+from ..services.generation_settings import load_generation_settings
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -35,7 +36,6 @@ class SettingsUpdate(BaseModel):
     active_character: str = None
     context: dict = None
     comfyui: dict = None
-    heartbeat: dict = None
     memory: dict = None
 
 
@@ -44,6 +44,7 @@ async def get_settings():
     path = settings.settings_file
     if path.exists():
         current = json.loads(path.read_text(encoding="utf-8"))
+        current.pop("heartbeat", None)
         if "context" in current:
             current["context"] = normalize_context_settings(current.get("context"))
         return current
@@ -54,6 +55,7 @@ async def get_settings():
 async def update_settings(updates: SettingsUpdate):
     path = settings.settings_file
     current = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    current.pop("heartbeat", None)
     for key, val in updates.model_dump(exclude_none=True).items():
         if val is not None:
             if key == "context":
@@ -62,6 +64,23 @@ async def update_settings(updates: SettingsUpdate):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(current, ensure_ascii=False, indent=2), encoding="utf-8")
     return current
+
+
+@router.get("/settings/comfyui/workflows")
+async def list_comfyui_workflows(root_dir: str | None = None):
+    """List JSON workflows from the configured ComfyUI user workflow folder."""
+    selected_root = str(root_dir or "").strip()
+    root = Path(selected_root) if selected_root else load_generation_settings().root_dir
+    workflow_dir = root / "ComfyUI" / "user" / "default" / "workflows"
+    try:
+        workflows = sorted(
+            path.name
+            for path in workflow_dir.iterdir()
+            if path.is_file() and path.suffix.lower() == ".json"
+        )
+    except OSError:
+        workflows = []
+    return {"workflows": workflows}
 
 
 class ProfileUpdate(BaseModel):
@@ -79,7 +98,7 @@ class ProfileUpdate(BaseModel):
 class CreateCharacterRequest(BaseModel):
     name: str
     display_name: str = None
-    gender: str = "female"
+    gender: str = ""
     avatar: str = "💕"
     avatar_role: str = ""
     body_type: str = ""
@@ -138,8 +157,7 @@ async def create_char(request: CreateCharacterRequest):
             "body_tags": request.body_type,
             "appearance_tags": request.appearance,
         }
-        # 皮肤信息只落 visual_anchor（profile.json 里只有这一份真相）。
-        # avatar_role / body_type / appearance / gender 都不再回写到 profile.json 顶层。
+        # 视觉锚点只落 visual_anchor；角色性别作为参与者事实保留在 profile.json 顶层。
         create_character(request.name, {
             "name": request.display_name or request.name,
             "gender": request.gender,
@@ -167,7 +185,7 @@ async def _generate_initial_outfit(
     fallback = _fallback_outfit(display_name, visual_anchor, identity, skin_match)
     system = """You generate Stable Diffusion / Danbooru outfit tags for anime character initialization.
 Return only JSON. The outfit must be safe for a normal first appearance, coherent, and not nude.
-Use English lowercase tags with underscores. Do not include body, hair, eye, pose, scene, rating, or character name tags."""
+Use English lowercase tags with underscores. Do not include body, hair, eye, pose, scene, or character name tags."""
     user = {
         "display_name": display_name,
         "identity": identity,
@@ -349,7 +367,6 @@ async def update_char_profile(name: str, updates: ProfileUpdate):
 
 @router.get("/characters/{name}/identity")
 async def get_char_identity(name: str):
-    migrate_character_assets(name)
     path = settings.get_character_dir(name) / "identity.md"
     if not path.exists():
         raise HTTPException(status_code=404, detail="identity.md 不存在")
@@ -362,7 +379,6 @@ class TextUpdate(BaseModel):
 
 @router.put("/characters/{name}/identity")
 async def update_char_identity(name: str, body: TextUpdate):
-    migrate_character_assets(name)
     path = settings.get_character_dir(name) / "identity.md"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(body.content, encoding="utf-8")
@@ -380,6 +396,7 @@ async def get_char_chat_history(name: str, limit: int = 500):
 
 
 class UserProfileUpdate(BaseModel):
+    gender: str = None
     user_pet_name: str = None
     identity: str = None
     communication_style: str = None
@@ -400,7 +417,6 @@ async def update_char_user_profile(name: str, body: UserProfileUpdate):
 
 @router.get("/characters/{name}/long-term")
 async def get_char_long_term(name: str):
-    migrate_character_assets(name)
     path = settings.get_memory_dir(name) / "long_term.md"
     if not path.exists():
         return {"content": ""}
@@ -409,7 +425,6 @@ async def get_char_long_term(name: str):
 
 @router.put("/characters/{name}/long-term")
 async def update_char_long_term(name: str, body: TextUpdate):
-    migrate_character_assets(name)
     path = settings.get_memory_dir(name) / "long_term.md"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(body.content, encoding="utf-8")
@@ -418,7 +433,6 @@ async def update_char_long_term(name: str, body: TextUpdate):
 
 @router.get("/characters/{name}/soul")
 async def get_char_soul(name: str):
-    migrate_character_assets(name)
     path = settings.get_memory_dir(name) / "soul.md"
     if not path.exists():
         return {"content": ""}
@@ -427,7 +441,6 @@ async def get_char_soul(name: str):
 
 @router.put("/characters/{name}/soul")
 async def update_char_soul(name: str, body: TextUpdate):
-    migrate_character_assets(name)
     path = settings.get_memory_dir(name) / "soul.md"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(body.content, encoding="utf-8")
@@ -474,7 +487,6 @@ async def get_memory_status(character: str = None):
 @router.get("/memory/daily/{date_str}")
 async def get_daily_memory(date_str: str, character: str = None):
     char = character or get_active()
-    migrate_character_assets(char)
     path = settings.get_memory_dir(char) / f"{date_str}.md"
     if not path.exists():
         raise HTTPException(status_code=404, detail="该日期无日记")

@@ -1,12 +1,13 @@
 {
-  "active_character": "小古",
+  "active_character": "sakura",
   "context": {
     "max_tokens": 100000,
     "compress_at": 0.75
   },
   "comfyui": {
+    "base_url": "http://127.0.0.1:8188",
     "root_dir": "D:\\ComfyUI",
-    "workflow": "ANIMA_workflow.json",
+    "workflow": "waiNSFWIllustrious_v140.json",
     "negative_prompt": "bad quality,worst quality,worst detail,sketch,censor",
     "sampler": null,
     "scheduler": null,
@@ -14,11 +15,6 @@
     "cfg": null,
     "width": null,
     "height": null
-  },
-  "heartbeat": {
-    "interval_minutes": 30,
-    "quiet_start": "23:00",
-    "quiet_end": "08:00"
   },
   "memory": {
     "condensation_days": 1,

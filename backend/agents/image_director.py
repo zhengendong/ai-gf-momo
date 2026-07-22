@@ -8,20 +8,22 @@ import re
 from typing import Any
 
 from ..config import settings
+from ..core.context import get_character_name
+from ..core.memory_v3 import load_user_profile
 from ..core.state import merge_continuity_patch, validate_initial_state_patch
-from ..core.wardrobe import wardrobe_agent_view, wardrobe_visible_prompt_tags, wardrobe_visible_tags
+from ..core.wardrobe import wardrobe_director_view
 from ..models.schemas import ContinuityOutput
-from ..services.prompt_builder import expand_prompt_tags, get_visual_anchor_tags
+from ..services.prompt_builder import get_visual_anchor_tags
 
 logger = logging.getLogger(__name__)
 
 
 class VisualContinuityError(RuntimeError):
-    """Raised when continuity cannot be resolved into a safe state patch."""
+    """Raised when continuity cannot be resolved into a valid state patch."""
 
 
 class VisualContinuityAgent:
-    """Interpret a role-play reply into state continuity and an optional shot."""
+    """Interpret a role-play reply, update continuity and optionally direct a shot."""
 
     def __init__(self, llm_client):
         self.llm = llm_client
@@ -33,36 +35,44 @@ class VisualContinuityAgent:
         character: str,
         user_message: str,
         reply: str,
-        image_goal: dict[str, Any] | None,
         previous_state: dict[str, Any],
         recent_dialogue: list[dict[str, str]] | None = None,
         business_knowledge: str = "",
         interaction_mode: str = "chat",
+        image_goal: dict[str, Any] | None = None,
     ) -> ContinuityOutput:
         """Resolve every turn; retry once when JSON or state structure is invalid."""
+        _ = business_knowledge, image_goal
         visual_anchor = get_visual_anchor_tags(character)
+        user_profile = load_user_profile(character)
+        initialized = bool(previous_state.get("initialized", True))
         payload = {
             "character": character,
             "user_message": user_message,
             "character_reply": reply,
-            "image_goal": image_goal,
             "interaction_mode": interaction_mode,
             "recent_dialogue": list(recent_dialogue or [])[-16:],
             "previous_state": {
                 "version": int(previous_state.get("version") or 0),
-                "initialized": bool(previous_state.get("initialized", True)),
-                "wardrobe": wardrobe_agent_view(previous_state.get("wardrobe") or {}),
-                "scene_tags": list(previous_state.get("scene_tags") or []),
-            },
-            "applicable_business_knowledge": business_knowledge,
-            "prompt_inputs": {
-                "role_tags": expand_prompt_tags(visual_anchor.get("role_tags")),
-                "body_tags": expand_prompt_tags(visual_anchor.get("body_tags")),
-                "appearance_tags": expand_prompt_tags(visual_anchor.get("appearance_tags")),
-                "instruction": (
-                    "role_tags、body_tags、appearance_tags 必须按原顺序完整保留；"
-                    "服饰与场景标签按本图重点筛选；动作和环境关系可用精简英文短语补充。"
+                "initialized": initialized,
+                "wardrobe": (
+                    wardrobe_director_view(previous_state.get("wardrobe") or {})
+                    if initialized
+                    else None
                 ),
+                "scene": list(previous_state.get("scene_tags") or []),
+            },
+            "participants": {
+                "character": {
+                    "name": get_character_name(character),
+                    "gender": visual_anchor.get("gender") or "unknown",
+                    "primary_subject": True,
+                },
+                "player": {
+                    "name": str(user_profile.get("user_pet_name") or "用户").strip(),
+                    "gender": str(user_profile.get("gender") or "unknown").strip().lower(),
+                    "pov_owner": True,
+                },
             },
         }
         last_error: Exception | None = None
@@ -73,7 +83,7 @@ class VisualContinuityAgent:
                 request["repair"] = {
                     "invalid_output": last_raw[:4000],
                     "error": str(last_error),
-                    "instruction": "重新输出完整合法 JSON；不要改变角色回复中的事实。",
+                    "instruction": "重新输出完整合法 JSON，并保持角色回复中已经发生的事实。",
                 }
             try:
                 raw = await self.llm.chat_prompt(
@@ -82,10 +92,9 @@ class VisualContinuityAgent:
                     temperature=0.2 if attempt else 0.35,
                 )
                 last_raw = raw or ""
-                result = self._parse(last_raw, image_goal)
+                result = self._parse(last_raw)
                 if interaction_mode.startswith("initial_scene"):
                     validate_initial_state_patch(result.state_patch)
-                # Dry-run the exact patch before any user-visible reply or file write.
                 merged_state = merge_continuity_patch(previous_state, result.state_patch)
                 if result.shot_spec is not None:
                     result.shot_spec = self.normalize_prompt_plan(
@@ -106,27 +115,17 @@ class VisualContinuityAgent:
 
     def system_prompt(self) -> str:
         if self._system_prompt is None:
-            path = settings.config_dir / "image_director.md"
-            protocol = path.read_text(encoding="utf-8")
+            protocol_path = settings.config_dir / "image_director.md"
+            protocol = protocol_path.read_text(encoding="utf-8")
             knowledge_path = settings.config_dir / "knowledge" / "visual_prompting.md"
-            knowledge = (
-                knowledge_path.read_text(encoding="utf-8")
-                if knowledge_path.exists()
-                else ""
-            )
-            self._system_prompt = (
-                f"{protocol}\n\n---\n\n{knowledge}" if knowledge else protocol
-            )
+            knowledge = knowledge_path.read_text(encoding="utf-8") if knowledge_path.exists() else ""
+            self._system_prompt = f"{protocol}\n\n---\n\n{knowledge}" if knowledge else protocol
         return self._system_prompt
 
     def reload_system_prompt(self):
         self._system_prompt = None
 
-    def _parse(
-        self,
-        raw: str,
-        image_goal: dict[str, Any] | None,
-    ) -> ContinuityOutput:
+    def _parse(self, raw: str) -> ContinuityOutput:
         text = re.sub(r"<think>.*?</think>", "", raw or "", flags=re.DOTALL).strip()
         if text.startswith("```"):
             lines = text.splitlines()
@@ -143,14 +142,10 @@ class VisualContinuityAgent:
         if not isinstance(state_patch, dict):
             raise ValueError("continuity output requires state_patch object")
 
-        raw_shot = data.get("shot_spec")
-        if image_goal:
-            # Prompt planning is outside the state transaction's safety
-            # boundary. Missing old-format fields degrade gracefully instead
-            # of cancelling the character reply and committed state.
-            shot_spec = _parse_shot(raw_shot if isinstance(raw_shot, dict) else {})
-        else:
-            shot_spec = None
+        raw_shot = data.get("shot")
+        if raw_shot is None:
+            raw_shot = data.get("shot_spec")
+        shot_spec = _parse_shot(raw_shot) if isinstance(raw_shot, dict) else None
         return ContinuityOutput(
             state_patch=state_patch,
             shot_spec=shot_spec,
@@ -163,147 +158,81 @@ class VisualContinuityAgent:
         visual_anchor: dict[str, Any],
         merged_state: dict[str, Any],
     ) -> dict[str, Any]:
-        """Normalize prompt facts without turning editorial errors into turn errors.
-
-        Character anchors and committed wardrobe/exposure facts are immutable.
-        Scene selection may only project committed facts. There is deliberately
-        no length budget.
-        """
+        """Finish the compact shot plan without copying fixed prompt anchors."""
+        _ = visual_anchor
         completed = dict(shot)
-        for field in ("role_tags", "body_tags", "appearance_tags"):
-            required = expand_prompt_tags(visual_anchor.get(field))
-            completed[field] = required
-
-        wardrobe_candidates = wardrobe_visible_prompt_tags(merged_state.get("wardrobe") or {})
-        scene_candidates = list(merged_state.get("scene_tags") or [])
-        # Clothing and exposure are visual continuity facts, not optional
-        # camera decoration. A foot or facial close-up must not silently make
-        # a topless/nude character appear dressed again.
-        completed["wardrobe_tags"] = wardrobe_candidates
-        completed["scene_tags"] = _keep_committed_tags(
-            completed.get("scene_tags"),
-            scene_candidates,
-        )
-        if scene_candidates and not completed["scene_tags"]:
-            completed["scene_tags"] = scene_candidates[:2]
+        if not str(completed.get("environment") or "").strip():
+            completed["environment"] = ", ".join(
+                str(tag).strip()
+                for tag in list(merged_state.get("scene_tags") or [])[:2]
+                if str(tag).strip()
+            ) or "current setting"
         return completed
-
-    @staticmethod
-    def fallback_shot(
-        character: str,
-        image_goal: dict[str, Any],
-        committed_state: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Create a local image fallback without another model request.
-
-        This only runs after the director has already exhausted its one repair.
-        It intentionally preserves the last committed visual facts rather than
-        guessing unverified state changes from prose.
-        """
-        shot = {
-            "generate": True,
-            "reason": "local continuity fallback",
-            "role_tags": [],
-            "body_tags": [],
-            "appearance_tags": [],
-            "wardrobe_tags": [],
-            "scene_tags": [],
-            "action_tags": [],
-            "action_text": None,
-            "environment_text": None,
-            "pose": [],
-            "expression": [],
-            "camera": {"shot": "medium_shot", "angle": None, "focus": None, "pov": False},
-            "lighting": [],
-            "rating": str(image_goal.get("rating") or "general").removeprefix("rating:"),
-        }
-        return VisualContinuityAgent.normalize_prompt_plan(
-            shot,
-            get_visual_anchor_tags(character),
-            committed_state,
-        )
 
     @staticmethod
     def harmonize_shot(
         shot: dict[str, Any] | None,
-        image_goal: dict[str, Any] | None,
         committed_state: dict[str, Any],
     ) -> dict[str, Any] | None:
-        """Apply small deterministic camera constraints after state commit."""
-        if not image_goal:
+        """Apply a small deterministic action-conflict repair after state commit."""
+        _ = committed_state
+        if not shot:
             return None
-        result = dict(shot or {})
-        action_tags = _string_list(result.get("action_tags"))
-        pose = _string_list(result.get("pose"))
-
-        normalized = {_norm_tag(tag) for tag in action_tags + pose}
-        spread = {"legs_spread", "spread_legs", "spreading_legs"}
-        together = {"legs_together", "knees_together"}
-        if normalized & spread:
-            action_tags = [tag for tag in action_tags if _norm_tag(tag) not in together]
-            pose = [tag for tag in pose if _norm_tag(tag) not in together]
-
-        if str(image_goal.get("visibility") or "").strip().lower() == "clear":
-            covering = {"covering_self", "hands_covering_crotch", "covering_crotch"}
-            action_tags = [tag for tag in action_tags if _norm_tag(tag) not in covering]
-            pose = [tag for tag in pose if _norm_tag(tag) not in covering]
-
-        wardrobe = committed_state.get("wardrobe")
-        visible = wardrobe_visible_tags(wardrobe) if isinstance(wardrobe, dict) else list(
-            committed_state.get("outfit_tags") or []
-        )
-        explicit = {
-            "completely_nude", "nude", "naked", "bare_body", "topless",
-            "bottomless", "no_bra", "no_panties",
-        }
-        rating = str(result.get("rating") or image_goal.get("rating") or "general").removeprefix("rating:")
-        if {_norm_tag(tag) for tag in visible} & explicit:
-            rating = "nsfw"
-        elif rating not in {"general", "sensitive", "nsfw"}:
-            rating = "general"
-
-        result["action_tags"] = action_tags
-        result["pose"] = pose
-        result["rating"] = rating
-        result["generate"] = True
+        result = dict(shot)
+        action = dict(result.get("action") or {})
+        action_tags = _string_list(action.get("tags"))
+        normalized = {_norm_tag(tag) for tag in action_tags}
+        if normalized & {"legs_spread", "spread_legs", "spreading_legs"}:
+            action_tags = [
+                tag for tag in action_tags
+                if _norm_tag(tag) not in {"legs_together", "knees_together"}
+            ]
+        action["tags"] = action_tags
+        result["action"] = action
         return result
 
 
 def _parse_shot(data: dict[str, Any]) -> dict[str, Any]:
+    """Normalize the compact protocol and accept the previous ShotSpec shape."""
     camera = data.get("camera") if isinstance(data.get("camera"), dict) else {}
-    shot = _optional_string(camera.get("shot"))
-    focus = _optional_string(camera.get("focus"))
-    if focus:
-        shot = None
-    elif not shot:
-        shot = "medium_shot"
-    rating = str(data.get("rating") or "general").removeprefix("rating:")
-    if rating not in {"general", "sensitive", "nsfw"}:
-        rating = "general"
-    action_tags = _string_list(data.get("action_tags"))
-    action_text = _optional_phrase(data.get("action_text"), max_words=25)
-    environment_text = _optional_phrase(data.get("environment_text"), max_words=18)
+    view = (
+        _optional_string(camera.get("view"))
+        or _optional_string(camera.get("focus"))
+        or _optional_string(camera.get("shot"))
+        or "medium_shot"
+    )
+
+    action_value = data.get("action") if isinstance(data.get("action"), dict) else None
+    if action_value is not None:
+        action_tags = _string_list(action_value.get("tags"))
+        action_text = _optional_phrase(action_value.get("text"), max_words=25)
+    else:
+        action_tags = _string_list(data.get("pose"))
+        for value in (*_string_list(data.get("action_tags")), *_string_list(data.get("expression"))):
+            if value not in action_tags:
+                action_tags.append(value)
+        action_text = _optional_phrase(data.get("action_text"), max_words=25)
+
+    if "environment" in data:
+        environment = _optional_phrase(data.get("environment"), max_words=18)
+        if not environment:
+            raise ValueError("shot.environment must be a non-empty string")
+    else:
+        environment_parts = [
+            *_string_list(data.get("scene_tags")),
+            *([_optional_phrase(data.get("environment_text"), max_words=18)] if data.get("environment_text") else []),
+            *_string_list(data.get("lighting")),
+        ]
+        environment = ", ".join(part for part in environment_parts if part)
+
     return {
-        "generate": True,
-        "reason": str(data.get("reason") or "").strip(),
-        "role_tags": _string_list(data.get("role_tags")),
-        "body_tags": _string_list(data.get("body_tags")),
-        "appearance_tags": _string_list(data.get("appearance_tags")),
-        "wardrobe_tags": _string_list(data.get("wardrobe_tags")),
-        "scene_tags": _string_list(data.get("scene_tags")),
-        "action_tags": action_tags,
-        "action_text": action_text,
-        "environment_text": environment_text,
-        "pose": _string_list(data.get("pose")),
-        "expression": _string_list(data.get("expression")),
         "camera": {
-            "shot": shot,
+            "view": view,
             "angle": _optional_string(camera.get("angle")),
-            "focus": focus,
             "pov": bool(camera.get("pov", False)),
         },
-        "lighting": _string_list(data.get("lighting")),
-        "rating": rating,
+        "action": {"tags": action_tags, "text": action_text},
+        "environment": environment,
     }
 
 
@@ -340,15 +269,6 @@ def _optional_phrase(value: Any, *, max_words: int) -> str | None:
 
 def _norm_tag(value: Any) -> str:
     return str(value or "").strip().lower().replace(" ", "_")
-
-
-def _keep_committed_tags(selected: Any, candidates: list[str]) -> list[str]:
-    by_norm = {_norm_tag(tag): tag for tag in candidates}
-    return [
-        by_norm[_norm_tag(tag)]
-        for tag in _string_list(selected)
-        if _norm_tag(tag) in by_norm
-    ]
 
 
 # Compatibility import for code outside the runtime that still uses the old name.

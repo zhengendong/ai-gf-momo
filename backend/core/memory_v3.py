@@ -19,6 +19,7 @@ OLD_PERSONALITY_MD = "personality.md"
 
 def default_user_profile() -> dict:
     return {
+        "gender": "",
         "user_pet_name": "",
         "identity": "",
         "communication_style": "",
@@ -54,7 +55,7 @@ def load_user_profile(character: str) -> dict:
 
 def save_user_profile(character: str, updates: dict) -> dict:
     profile = load_user_profile(character)
-    for key in ("user_pet_name", "identity", "communication_style", "notes"):
+    for key in ("gender", "user_pet_name", "identity", "communication_style", "notes"):
         if key in updates and updates[key] is not None:
             profile[key] = str(updates[key]).strip()
     profile["last_updated"] = datetime.now(timezone.utc).isoformat()
@@ -66,6 +67,8 @@ def save_user_profile(character: str, updates: dict) -> dict:
 
 def render_user_profile(profile: dict) -> str:
     lines = ["# 用户信息", ""]
+    if profile.get("gender"):
+        lines.append(f"- 用户性别：{profile['gender']}")
     if profile.get("user_pet_name"):
         lines.append(f"- 当前称呼：{profile['user_pet_name']}")
     if profile.get("identity"):
@@ -105,7 +108,7 @@ def migrate_character_memory_v3(character: str) -> bool:
 
     if not user_path.exists():
         profile = default_user_profile()
-        for key in ("user_pet_name", "identity", "communication_style", "notes", "last_updated"):
+        for key in ("gender", "user_pet_name", "identity", "communication_style", "notes", "last_updated"):
             if old_profile.get(key):
                 profile[key] = old_profile[key]
         user_path.write_text(json.dumps(profile, ensure_ascii=False, indent=2), encoding="utf-8")

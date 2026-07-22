@@ -330,10 +330,30 @@ def get_visual_anchor_tags(character: str) -> dict:
     profile = load_character_profile(character)
     visual = profile.get("visual_anchor") or {}
     return {
+        "gender": str(profile.get("gender") or "").strip().lower(),
         "role_tags": visual.get("role_tags") or profile.get("avatar_role", ""),
         "body_tags": visual.get("body_tags") or profile.get("body_type", ""),
         "appearance_tags": visual.get("appearance_tags") or profile.get("appearance", ""),
     }
+
+
+def gender_subject_tag(gender) -> str:
+    value = str(gender or "").strip().lower()
+    if value in {"female", "woman", "girl", "女", "女性"}:
+        return "1girl"
+    if value in {"male", "man", "boy", "男", "男性"}:
+        return "1boy"
+    return ""
+
+
+def apply_character_subject_tag(gender, role_tags) -> list[str]:
+    """Place the character count/gender tag before stable role tags."""
+    subject_tag = gender_subject_tag(gender)
+    tags = expand_prompt_tags(role_tags)
+    if subject_tag:
+        tags = [tag for tag in tags if _norm_tag(tag) not in {"1girl", "1boy"}]
+        tags.insert(0, subject_tag)
+    return _dedupe_tags(tags)
 
 
 def expand_prompt_tags(value) -> list[str]:
@@ -361,7 +381,7 @@ def expand_prompt_tags(value) -> list[str]:
 
 
 def normalize_prompt(prompt: str) -> str:
-    """标准化 prompt 标签：去重、修正非法 rating。"""
+    """标准化 prompt 标签并去重。"""
     tags = _split_prompt_tags(prompt)
     return ", ".join(_dedupe_tags(tags))
 
@@ -481,8 +501,6 @@ def _dedupe_tags(tags: list[str]) -> list[str]:
         t = tag.strip()
         if not t:
             continue
-        if _norm_tag(t).startswith("rating:explicit"):
-            t = "rating:nsfw"
         norm = _norm_tag(t)
         if norm not in seen:
             seen.add(norm)
@@ -496,20 +514,15 @@ def _is_rating_tag(tag: str) -> bool:
 
 def _ensure_required_prompt_tags(prompt: str) -> str:
     tags = _dedupe_tags(_split_prompt_tags(prompt))
-    ratings = [tag for tag in tags if _is_rating_tag(tag)]
-    if not ratings:
-        default_rating = "rating:nsfw" if _has_explicit_nudity(tags) else "rating:general"
-        ratings = [default_rating]
-        logger.info("最终 prompt 缺少 rating，已补齐为 %s", default_rating)
-
     quality_norms = {_norm_tag(tag) for tag in QUALITY_TAGS}
     body = [
         tag for tag in tags
         if not _is_rating_tag(tag) and _norm_tag(tag) not in quality_norms
     ]
     # Prompt order is intentional: earlier groups receive stronger attention
-    # from the image model. Keep quality/rating at the very front.
-    return ", ".join(_dedupe_tags(list(QUALITY_TAGS) + ratings[:1] + body))
+    # from the image model. Keep quality tags at the very front. Legacy rating
+    # tags are discarded because rating is no longer part of the prompt contract.
+    return ", ".join(_dedupe_tags(list(QUALITY_TAGS) + body))
 
 
 def _split_status_tags(raw: str) -> list[str]:
@@ -591,24 +604,6 @@ def _resolve_clothing_conflicts(tags: list[str]) -> list[str]:
     return result
 
 
-def _harmonize_rating(prompt: str) -> str:
-    """裸露标签存在时，避免仍标 rating:general。"""
-    tags = _split_prompt_tags(prompt)
-    if not _has_explicit_nudity(tags):
-        return prompt
-    fixed = []
-    changed = False
-    for tag in tags:
-        if tag.lower().replace(" ", "_") == "rating:general":
-            fixed.append("rating:nsfw")
-            changed = True
-        else:
-            fixed.append(tag)
-    if changed:
-        logger.info("检测到裸露状态，已将 rating:general 修正为 rating:nsfw")
-    return ", ".join(fixed)
-
-
 def build_image_prompt(
     character: str,
     prompt: str,
@@ -624,13 +619,19 @@ def build_image_prompt(
     appearance, wardrobe or scene tag.
     """
     if isinstance(shot_spec, dict):
-        return _build_directed_prompt(shot_spec)
+        return _build_directed_prompt(
+            shot_spec,
+            character=character,
+            state_snapshot=state_snapshot,
+        )
 
     # Compatibility path for legacy/manual callers that do not carry a
     # VisualContinuityAgent ShotSpec.
     prompt = sanitize_dynamic_photo_prompt(prompt)
     visual_anchor = get_visual_anchor_tags(character)
-    avatar_role = ", ".join(expand_prompt_tags(visual_anchor["role_tags"]))
+    avatar_role = ", ".join(
+        apply_character_subject_tag(visual_anchor.get("gender"), visual_anchor["role_tags"])
+    )
     body_type = ", ".join(expand_prompt_tags(visual_anchor["body_tags"]))
     appearance = ", ".join(expand_prompt_tags(visual_anchor["appearance_tags"]))
 
@@ -686,7 +687,7 @@ def build_image_prompt(
         else:
             action_tags.append(tag)
 
-    # Stable semantic order: quality/rating are moved to the front by
+    # Stable semantic order: quality tags are moved to the front by
     # _ensure_required_prompt_tags; the remaining groups follow the visual
     # hierarchy requested by the product contract.
     scene_values = scene_tags.split(", ") if scene_tags else []
@@ -698,48 +699,80 @@ def build_image_prompt(
         ", ".join([*scene_values, *lighting_tags]),
     ]
     parts = [p for p in ordered_body if p]
-    final_prompt = normalize_prompt(
-        normalize_camera_action_tags(
-                _harmonize_rating(", ".join(parts))
-            )
-    )
+    final_prompt = normalize_prompt(normalize_camera_action_tags(", ".join(parts)))
     final_prompt = _ensure_required_prompt_tags(final_prompt)
     final_prompt = _cap_prompt_tags(final_prompt)
     logger.info(f"最终生图 prompt 已构建: character={character}, {len(final_prompt)} 字符")
     return final_prompt
 
 
-def _build_directed_prompt(shot: dict) -> str:
-    """Serialize the director-owned final prompt plan in stable priority order."""
+def _build_directed_prompt(
+    shot: dict,
+    character: str | None = None,
+    state_snapshot: dict | None = None,
+) -> str:
+    """Combine fixed character/state facts with the director's compact shot plan."""
     camera = shot.get("camera") if isinstance(shot.get("camera"), dict) else {}
-    rating = str(shot.get("rating") or "general").removeprefix("rating:")
+    visual_anchor = get_visual_anchor_tags(character) if character else {}
+    role_tags = apply_character_subject_tag(
+        visual_anchor.get("gender"),
+        visual_anchor.get("role_tags"),
+    )
+    wardrobe_tags: list[str] = []
+    if isinstance(state_snapshot, dict):
+        wardrobe = state_snapshot.get("wardrobe")
+        if isinstance(wardrobe, dict):
+            wardrobe_tags = wardrobe_visible_prompt_tags(wardrobe)
+        else:
+            wardrobe_tags = expand_prompt_tags(state_snapshot.get("outfit_tags"))
+    if character:
+        # Manual compatibility callers may not supply a frozen snapshot.
+        if state_snapshot is None:
+            wardrobe_tags = expand_prompt_tags(get_clothing_tags(character))
     mandatory = [
         *QUALITY_TAGS,
-        f"rating:{rating}",
-        *expand_prompt_tags(shot.get("role_tags")),
-        *expand_prompt_tags(shot.get("body_tags")),
-        *expand_prompt_tags(shot.get("appearance_tags")),
-        *expand_prompt_tags(shot.get("wardrobe_tags")),
+        *role_tags,
+        *expand_prompt_tags(visual_anchor.get("body_tags")),
+        *expand_prompt_tags(visual_anchor.get("appearance_tags")),
+        *wardrobe_tags,
     ]
-    composition = [
-        *[str(camera.get(key)).strip() for key in ("shot", "angle", "focus") if camera.get(key)],
-        *(["pov"] if camera.get("pov") else []),
-        *expand_prompt_tags(shot.get("pose")),
-        *expand_prompt_tags(shot.get("action_tags")),
-        *expand_prompt_tags(shot.get("expression")),
-        *([_compact_natural_phrase(shot.get("action_text"), ACTION_TEXT_MAX_WORDS)] if shot.get("action_text") else []),
-    ]
-    optional_environment = [
-        *expand_prompt_tags(shot.get("scene_tags")),
-        *([_compact_natural_phrase(shot.get("environment_text"), ENVIRONMENT_TEXT_MAX_WORDS)] if shot.get("environment_text") else []),
-        *expand_prompt_tags(shot.get("lighting")),
-    ]
-    final_units = _dedupe_tags([*mandatory, *composition, *optional_environment])
-    if _has_explicit_nudity(final_units):
-        final_units = [
-            "rating:nsfw" if _is_rating_tag(tag) else tag
-            for tag in final_units
+
+    action = shot.get("action") if isinstance(shot.get("action"), dict) else None
+    if action is not None:
+        action_tags = expand_prompt_tags(action.get("tags"))
+        action_text = action.get("text")
+    else:
+        action_tags = [
+            *expand_prompt_tags(shot.get("pose")),
+            *expand_prompt_tags(shot.get("action_tags")),
+            *expand_prompt_tags(shot.get("expression")),
         ]
+        action_text = shot.get("action_text")
+
+    view = camera.get("view") or camera.get("focus") or camera.get("shot")
+    composition = [
+        *([str(view).strip()] if view else []),
+        *([str(camera.get("angle")).strip()] if camera.get("angle") else []),
+        *(["pov"] if camera.get("pov") else []),
+        *action_tags,
+        *([_compact_natural_phrase(action_text, ACTION_TEXT_MAX_WORDS)] if action_text else []),
+    ]
+    environment = shot.get("environment")
+    if environment is None:
+        legacy_environment = [
+            *expand_prompt_tags(shot.get("scene_tags")),
+            *([_compact_natural_phrase(shot.get("environment_text"), ENVIRONMENT_TEXT_MAX_WORDS)] if shot.get("environment_text") else []),
+            *expand_prompt_tags(shot.get("lighting")),
+        ]
+        environment_units = legacy_environment
+    else:
+        environment_units = [
+            _compact_natural_phrase(environment, ENVIRONMENT_TEXT_MAX_WORDS)
+        ]
+    final_units = [
+        tag for tag in _dedupe_tags([*mandatory, *composition, *environment_units])
+        if not _is_rating_tag(tag)
+    ]
     final_prompt = ", ".join(final_units)
     logger.info("导演最终 prompt 已构建: %s units", len(final_units))
     return final_prompt

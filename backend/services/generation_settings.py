@@ -14,6 +14,13 @@ DEFAULT_WORKFLOW = "waiNSFWIllustrious_v140.json"
 DEFAULT_COMFYUI_ROOT = Path("D:/ComfyUI")
 
 
+def load_comfyui_base_url() -> str:
+    """Read the optional UI-configured ComfyUI API base URL."""
+    raw = _load_settings_json()
+    profile = raw.get("comfyui") if isinstance(raw.get("comfyui"), dict) else {}
+    return _optional_text(profile.get("base_url")) or settings.comfyui.base_url
+
+
 @dataclass(frozen=True)
 class GenerationSettings:
     """One resolved global image-generation profile.
@@ -41,14 +48,7 @@ class GenerationSettings:
 
 def load_generation_settings() -> GenerationSettings:
     """Read the frontend-owned ComfyUI profile from ``config/settings.json``."""
-    raw: dict[str, Any] = {}
-    try:
-        if settings.settings_file.exists():
-            loaded = json.loads(settings.settings_file.read_text(encoding="utf-8"))
-            if isinstance(loaded, dict):
-                raw = loaded
-    except (OSError, json.JSONDecodeError):
-        raw = {}
+    raw = _load_settings_json()
 
     configured = raw.get("comfyui")
     profile = configured if isinstance(configured, dict) else {}
@@ -66,6 +66,17 @@ def load_generation_settings() -> GenerationSettings:
         width=_optional_int(profile.get("width")),
         height=_optional_int(profile.get("height")),
     )
+
+
+def _load_settings_json() -> dict[str, Any]:
+    try:
+        if settings.settings_file.exists():
+            loaded = json.loads(settings.settings_file.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                return loaded
+    except (OSError, json.JSONDecodeError):
+        pass
+    return {}
 
 
 def _optional_text(value: Any) -> str | None:

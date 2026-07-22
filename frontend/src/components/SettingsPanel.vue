@@ -35,9 +35,10 @@
             <div class="form-field">
               <label>性别</label>
               <select v-model="profile.gender">
-                <option value="female">female</option>
-                <option value="male">male</option>
-                <option value="other">other</option>
+                <option value="">未设置</option>
+                <option value="female">女性</option>
+                <option value="male">男性</option>
+                <option value="other">其他</option>
               </select>
             </div>
           </div>
@@ -58,6 +59,15 @@
 
       <div v-if="activeTab === '用户'" class="tab-content">
         <div class="form-card">
+          <div class="form-field">
+            <label>玩家性别</label>
+            <select v-model="userProfile.gender">
+              <option value="">未设置</option>
+              <option value="female">女性</option>
+              <option value="male">男性</option>
+              <option value="other">其他</option>
+            </select>
+          </div>
           <div class="form-field">
             <label>当前称呼</label>
             <input v-model="userProfile.user_pet_name" :placeholder="`${profile.name || activeCharId}当前对用户的称呼`" />
@@ -99,13 +109,25 @@
 
       <div v-if="activeTab === '生图'" class="tab-content">
         <div class="form-field">
+          <label>ComfyUI 服务地址</label>
+          <input v-model="settings.comfyui.base_url" placeholder="http://127.0.0.1:8188" />
+          <div class="field-hint">填写 ComfyUI 实际 API 地址；支持反向代理地址和路径前缀。</div>
+        </div>
+        <div class="form-field">
           <label>ComfyUI 根目录</label>
-          <input v-model="settings.comfyui.root_dir" placeholder="D:\\ComfyUI" />
+          <input v-model="settings.comfyui.root_dir" @change="loadWorkflows" placeholder="D:\\ComfyUI" />
           <div class="field-hint">工作流将从 &lt;根目录&gt;\\ComfyUI\\user\\default\\workflows 读取。</div>
         </div>
         <div class="form-field">
           <label>工作流</label>
-          <input v-model="settings.comfyui.workflow" />
+          <select v-model="settings.comfyui.workflow" :disabled="workflowLoading">
+            <option v-if="workflowOptions.length === 0" :value="settings.comfyui.workflow">
+              {{ workflowLoading ? '正在读取工作流…' : (settings.comfyui.workflow || '未找到工作流') }}
+            </option>
+            <option v-for="workflow in workflowOptions" :key="workflow" :value="workflow">{{ workflow }}</option>
+          </select>
+          <div class="field-hint" v-if="workflowOptions.length">已读取 {{ workflowOptions.length }} 个工作流文件。</div>
+          <div class="field-hint" v-else-if="!workflowLoading">未在该目录找到 JSON 工作流，请检查根目录。</div>
         </div>
         <div class="form-field">
           <label>负面提示词</label>
@@ -162,17 +184,6 @@
             </div>
             <button @click="saveSoul" class="save-btn">保存灵魂</button>
           </div>
-        </div>
-      </div>
-
-      <div v-if="activeTab === 'Heartbeat'" class="tab-content">
-        <div class="form-field">
-          <label>间隔（分钟）</label>
-          <input v-model.number="settings.heartbeat.interval_minutes" type="number" />
-        </div>
-        <div class="form-row">
-          <div class="form-field"><label>静默开始</label><input v-model="settings.heartbeat.quiet_start" /></div>
-          <div class="form-field"><label>静默结束</label><input v-model="settings.heartbeat.quiet_end" /></div>
         </div>
       </div>
 
@@ -243,12 +254,12 @@ const { profile, activeCharId, saveProfile } = useCharacter()
 const API = '/api'
 const isOpen = ref(false)
 const activeTab = ref('通用')
-const tabs = ['通用', '角色', '用户', '皮肤', '生图', '记忆', 'Heartbeat', '模型']
+const tabs = ['通用', '角色', '用户', '皮肤', '生图', '记忆', '模型']
 const saved = ref(false)
 const identityContent = ref('')
 const longTermContent = ref('')
 const soulContent = ref('')
-const userProfile = reactive({ user_pet_name: '', identity: '', communication_style: '', notes: '' })
+const userProfile = reactive({ gender: '', user_pet_name: '', identity: '', communication_style: '', notes: '' })
 
 const llmProfiles = ref([])
 const activeProfileName = ref('')
@@ -257,10 +268,13 @@ const fetchedModels = ref([])
 const providers = ref([])
 const editingProviderKey = ref(null)
 const newProviderKey = ref('')
+const workflowOptions = ref([])
+const workflowLoading = ref(false)
 
 const settings = reactive({
   context: { max_tokens: 16000, compress_at: 0.85 },
   comfyui: {
+    base_url: 'http://127.0.0.1:8188',
     root_dir: 'D:\\ComfyUI',
     workflow: 'waiNSFWIllustrious_v140.json',
     negative_prompt: null,
@@ -280,7 +294,6 @@ const settings = reactive({
     vector_top_k: 5,
     vector_max_distance: 0.55
   },
-  heartbeat: { interval_minutes: 30, quiet_start: '23:00', quiet_end: '08:00' },
 })
 
 const contextWindowK = computed({
@@ -395,7 +408,7 @@ const loadCharacterDocs = async () => {
   } catch (e) { /* ignore */ }
   try {
     const r = await fetch(`${API}/characters/${char}/user-profile`)
-    if (r.ok) Object.assign(userProfile, { user_pet_name: '', identity: '', communication_style: '', notes: '' }, await r.json())
+    if (r.ok) Object.assign(userProfile, { gender: '', user_pet_name: '', identity: '', communication_style: '', notes: '' }, await r.json())
   } catch (e) { /* ignore */ }
   try {
     const r = await fetch(`${API}/characters/${char}/long-term`)
@@ -407,12 +420,29 @@ const loadCharacterDocs = async () => {
   } catch (e) { /* ignore */ }
 }
 
+const loadWorkflows = async () => {
+  workflowLoading.value = true
+  try {
+    const rootDir = String(settings.comfyui?.root_dir || '').trim()
+    const query = rootDir ? `?root_dir=${encodeURIComponent(rootDir)}` : ''
+    const response = await fetch(`${API}/settings/comfyui/workflows${query}`)
+    if (!response.ok) throw new Error('workflow list unavailable')
+    const data = await response.json()
+    workflowOptions.value = Array.isArray(data.workflows) ? data.workflows : []
+  } catch (e) {
+    workflowOptions.value = []
+  } finally {
+    workflowLoading.value = false
+  }
+}
+
 onMounted(async () => {
   try {
     const s = await fetch(`${API}/settings`).then(r => r.json())
     Object.assign(settings, s)
     normalizeMemorySettings()
   } catch (e) { console.error('加载设置失败:', e) }
+  await loadWorkflows()
   await loadCharacterDocs()
   await loadProfiles()
   await loadProviders()
@@ -546,6 +576,7 @@ const normalizeComfyuiOverrides = () => {
     return Number.isFinite(number) ? number : null
   }
   return {
+    base_url: optionalText(source.base_url) || 'http://127.0.0.1:8188',
     root_dir: optionalText(source.root_dir) || 'D:\\ComfyUI',
     workflow: optionalText(source.workflow) || 'waiNSFWIllustrious_v140.json',
     negative_prompt: optionalText(source.negative_prompt),

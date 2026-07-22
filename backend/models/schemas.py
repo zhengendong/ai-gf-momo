@@ -29,7 +29,7 @@ class AgentOutput(BaseModel):
     )
     image_goal: Optional[dict[str, Any]] = Field(
         None,
-        description="高层图片交付目标；不包含镜头标签、服饰、场景或模型配置",
+        description="旧版主 Agent 图片目标兼容字段；新 MomoAgent 始终为 null",
     )
     effects: list[dict[str, Any]] = Field(
         default_factory=list,
@@ -59,7 +59,7 @@ class ContinuityOutput(BaseModel):
     )
     shot_spec: Optional[dict[str, Any]] = Field(
         None,
-        description="仅在 image_goal 存在时生成的最终提示词标签计划与镜头设计",
+        description="导演认为本轮值得生图时给出的最终画面计划；null 表示不生图",
     )
     reason: str = Field("", description="仅供内部诊断的连续性判断摘要")
 
@@ -92,7 +92,6 @@ class AppSettings(BaseModel):
     active_character: str = Field(default="momo")
     context: dict = Field(default_factory=lambda: {"max_tokens": 16000, "compress_at": 0.85})
     comfyui: dict = Field(default_factory=dict)
-    heartbeat: dict = Field(default_factory=lambda: {"interval_minutes": 30, "quiet_start": "23:00", "quiet_end": "08:00"})
     memory: dict = Field(default_factory=lambda: {
         "condensation_days": 1,
         "retention_days": 30,

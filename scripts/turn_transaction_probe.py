@@ -39,13 +39,6 @@ async def main():
             llm = FakeLLM([
                 {
                     "reply": "我已经完成了本轮变化，现在给你看。",
-                    "image_goal": {
-                        "required": True,
-                        "purpose": "展示本轮完成的变化",
-                        "subject": "feet",
-                        "visibility": "clear",
-                        "rating": "general",
-                    },
                     "memory_candidate": None,
                     "persist_context": True,
                 },
@@ -53,30 +46,22 @@ async def main():
                     "reason": "回复明确完成了脱鞋，更新 footwear 并设计画面。",
                     "state_patch": {
                         "wardrobe": {
-                            "footwear": {"mode": "replace", "layers": []},
+                            "footwear": [],
                         },
                         "scene": None,
                     },
-                    "shot_spec": {
+                    "shot": {
                         "reason": "清楚展示已完成的变化",
-                        "role_tags": ["1girl", "solo"],
-                        "body_tags": ["petite"],
-                        "appearance_tags": ["black_hair", "brown_eyes"],
-                        "wardrobe_tags": ["white thighhighs"],
-                        "scene_tags": ["bedroom"],
-                        "action_tags": ["showing_feet"],
-                        "action_text": "She extends both feet toward the viewer after removing her shoes.",
-                        "pose": ["sitting_on_bed"],
-                        "expression": ["looking_at_viewer"],
+                        "action": {
+                            "tags": ["sitting_on_bed", "showing_feet", "looking_at_viewer"],
+                            "text": "extending both feet toward the viewer after removing her shoes",
+                        },
                         "camera": {
-                            "shot": None,
+                            "view": "foot_focus",
                             "angle": "front_view",
-                            "focus": "foot_focus",
                             "pov": False,
                         },
-                        "environment_text": "She sits at the edge of a bed with the floor below.",
-                        "lighting": ["warm_lighting"],
-                        "rating": "general",
+                        "environment": "bedroom, warm light, bed edge and floor below",
                     },
                 },
             ])
@@ -93,9 +78,13 @@ async def main():
             assert "black_mary_jane_shoes" not in read_status(CHARACTER)
             assert len(llm.calls) == 2, "one role call plus one always-on continuity call"
             director_payload = json.loads(llm.calls[1]["user"])
-            assert director_payload["prompt_inputs"]["role_tags"] == ["1girl", "solo"]
-            assert director_payload["prompt_inputs"]["body_tags"] == ["petite"]
-            assert director_payload["prompt_inputs"]["appearance_tags"] == ["black_hair", "brown_eyes"]
+            assert "image_goal" not in director_payload
+            assert "prompt_inputs" not in director_payload
+            assert director_payload["previous_state"]["wardrobe"]["footwear"] == ["black_mary_jane_shoes"]
+            assert director_payload["participants"]["character"]["gender"] == "female"
+            assert director_payload["participants"]["character"]["primary_subject"] is True
+            assert director_payload["participants"]["player"]["gender"] == "male"
+            assert director_payload["participants"]["player"]["pov_owner"] is True
 
             statuses = [chunk.content for chunk in sender.chunks if chunk.type == "image_status"]
             assert "generating" in statuses
@@ -109,21 +98,20 @@ async def main():
             assert "barefoot" not in prompt
             assert "white shirt" in prompt and "black pleated skirt" in prompt
             assert "petite" in prompt and "black_hair" in prompt and "brown_eyes" in prompt
-            assert "She extends both feet toward the viewer" in prompt
-            assert "She sits at the edge of a bed" in prompt
+            assert "extending both feet toward the viewer" in prompt
+            assert "bed edge and floor below" in prompt
             assert ":0.9" not in prompt and ":1.1" not in prompt
 
             refusal_llm = FakeLLM([
                 {
                     "reply": "现在还没准备好，不能给你看。",
-                    "image_goal": None,
                     "memory_candidate": None,
                     "persist_context": True,
                 },
                 {
                     "reason": "角色拒绝，状态不变。",
                     "state_patch": {"wardrobe": {}, "scene": None},
-                    "shot_spec": None,
+                    "shot": None,
                 },
             ])
             refusal_sender = CapturingSender()
@@ -134,29 +122,17 @@ async def main():
             assert len(refusal_llm.calls) == 2, "continuity runs even when no image is requested"
             assert not any(chunk.type == "image" for chunk in refusal_sender.chunks)
 
-            # Prompt-planning failure recovers through a state-only director
-            # call; it must still deliver the reply and requested image.
+            # A fully invalid director response must not add another model
+            # call or block delivery of the character reply.
             before_failure = read_state_snapshot(CHARACTER)
             failure_llm = FakeLLM([
                 {
                     "reply": "我站到你面前，让你看清楚。",
-                    "image_goal": {
-                        "required": True,
-                        "purpose": "展示角色",
-                        "subject": "角色当前姿态",
-                        "visibility": "clear",
-                        "rating": "general",
-                    },
                     "memory_candidate": None,
                     "persist_context": True,
                 },
                 "not-json",
                 "still-not-json",
-                {
-                    "reason": "状态没有变化。",
-                    "state_patch": {"wardrobe": {}, "scene": None},
-                    "shot_spec": None,
-                },
             ])
             failure_sender = CapturingSender()
             failure_runtime = AgentRuntime(failure_llm, FakeComfy(), failure_sender)
@@ -165,7 +141,8 @@ async def main():
             if bg_tasks.active_count:
                 await asyncio.gather(*list(bg_tasks._tasks), return_exceptions=False)
             assert any(chunk.type == "text" for chunk in failure_sender.chunks)
-            assert any(chunk.type == "image" for chunk in failure_sender.chunks)
+            assert not any(chunk.type == "image" for chunk in failure_sender.chunks)
+            assert len(failure_llm.calls) == 3, "one role call plus one director attempt and one repair"
             assert not any(
                 chunk.type == "status_update" and "状态同步失败" in (chunk.content or "")
                 for chunk in failure_sender.chunks

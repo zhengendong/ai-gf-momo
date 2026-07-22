@@ -165,6 +165,66 @@ def normalize_wardrobe(value: Any) -> dict[str, Any]:
     return _reconcile_absence(result)
 
 
+def _expand_director_wardrobe_patch(
+    wardrobe: dict[str, Any],
+    patch: dict[str, Any],
+) -> dict[str, Any]:
+    """Convert compact string-array slot replacements to the canonical patch."""
+    if not any(isinstance(value, list) for value in patch.values()):
+        return patch
+
+    normalized_lists: dict[str, list[str]] = {}
+    for raw_slot, raw_change in patch.items():
+        slot = _norm_slot(raw_slot)
+        if isinstance(raw_change, list):
+            phrases: list[str] = []
+            for raw_phrase in raw_change:
+                if not isinstance(raw_phrase, str):
+                    raise WardrobeOperationError(
+                        f"wardrobe patch for {slot} must contain garment strings"
+                    )
+                phrase = _norm_tag(raw_phrase)
+                if phrase and phrase not in phrases:
+                    phrases.append(phrase)
+            normalized_lists[slot] = phrases
+
+    phrase_slots: dict[str, list[str]] = {}
+    for slot, phrases in normalized_lists.items():
+        for phrase in phrases:
+            phrase_slots.setdefault(phrase, []).append(slot)
+
+    definitions: dict[str, dict[str, Any]] = {}
+    phrase_ids: dict[tuple[str, tuple[str, ...]], str] = {}
+    expanded: dict[str, Any] = {}
+    for raw_slot, raw_change in patch.items():
+        slot = _norm_slot(raw_slot)
+        if not isinstance(raw_change, list):
+            expanded[raw_slot] = raw_change
+            continue
+        layers: list[dict[str, Any]] = []
+        for phrase in normalized_lists.get(slot, []):
+            shared_slots = phrase_slots.get(phrase, [slot])
+            slots = (
+                [candidate for candidate in ("upper", "lower") if candidate in shared_slots]
+                if "upper" in shared_slots and "lower" in shared_slots
+                else [slot]
+            )
+            key = (phrase, tuple(slots))
+            item_id = phrase_ids.get(key)
+            if item_id is None:
+                item_id = _next_item_id_for_sets(wardrobe, definitions, slots[0])
+                definition = {
+                    "slots": slots,
+                    "tags": [phrase],
+                    "category": infer_category([phrase], slots),
+                }
+                phrase_ids[key] = item_id
+                definitions[item_id] = definition
+            layers.append({"id": item_id, **definitions[item_id]})
+        expanded[slot] = {"mode": "replace", "layers": layers}
+    return expanded
+
+
 def apply_wardrobe_patch(wardrobe: dict[str, Any], patch: Any) -> dict[str, Any]:
     """Merge VisualContinuityAgent slot replacements into canonical state.
 
@@ -177,6 +237,7 @@ def apply_wardrobe_patch(wardrobe: dict[str, Any], patch: Any) -> dict[str, Any]
         return result
     if not isinstance(patch, dict):
         raise WardrobeOperationError("wardrobe patch must be an object")
+    patch = _expand_director_wardrobe_patch(result, patch)
 
     replacements: dict[str, list[dict[str, Any]]] = {}
     for raw_slot, raw_change in patch.items():
@@ -299,6 +360,21 @@ def wardrobe_agent_view(wardrobe: dict[str, Any]) -> dict[str, Any]:
         "known_absent": list(value.get("known_absent") or []),
         "visible_tags": wardrobe_visible_tags(value),
     }
+
+
+def wardrobe_director_view(wardrobe: dict[str, Any]) -> dict[str, list[str]]:
+    """Return the compact inner-to-outer slot view used by the director."""
+    value = normalize_wardrobe(wardrobe)
+    result: dict[str, list[str]] = {}
+    for slot in DEFAULT_SLOTS:
+        phrases: list[str] = []
+        for item_id in value["layers"].get(slot, []):
+            item = value["items"].get(item_id) or {}
+            phrase = _compact_garment_tags(_normalize_tags(item.get("tags")))
+            if phrase and phrase[0] not in phrases:
+                phrases.append(phrase[0])
+        result[slot] = phrases
+    return result
 
 
 def reduce_wardrobe(wardrobe: dict[str, Any], operations: list[dict]) -> dict[str, Any]:

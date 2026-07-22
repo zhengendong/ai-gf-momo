@@ -78,29 +78,6 @@ COMPLETED_REPLY_PATTERNS = (
     "到了",
 )
 
-VISUAL_FULFILLMENT_PATTERNS = (
-    "给你看",
-    "让你看",
-    "让客人看",
-    "好好看看",
-    "看到了吗",
-    "看清",
-    "这样可以吗",
-    "这样…可以吗",
-    "展示给",
-)
-
-VISUAL_NON_FULFILLMENT_PATTERNS = (
-    "不能给你看",
-    "不想给你看",
-    "不给你看",
-    "还不能看",
-    "还没准备好",
-    "以后再给你看",
-    "等会再给你看",
-)
-
-
 async def check_output_consistency(
     character: str,
     output: AgentOutput,
@@ -199,21 +176,8 @@ def _local_consistency_issues(
             "state has changed."
         )
 
-    if output.image_goal is not None and not isinstance(output.image_goal, dict):
-        issues.append("image_goal must be an object or null.")
-    elif isinstance(output.image_goal, dict):
-        if not str(output.image_goal.get("purpose") or "").strip():
-            issues.append("image_goal requires a purpose.")
-        if not str(output.image_goal.get("subject") or "").strip():
-            issues.append("image_goal requires a subject.")
-
-    legacy_image = bool(output.image_intent or output.photo_prompt)
-    accepted_visual_delivery = bool(output.state_ops or output.effects) or _reply_commits_visual_delivery(output.reply)
-    if visual_requested and accepted_visual_delivery and not (output.image_goal or legacy_image):
-        issues.append(
-            "the user explicitly requested a visual delivery and the reply/effects indicate fulfillment, "
-            "but image_goal is missing. Add a semantic image_goal or rewrite the reply as not yet fulfilled."
-        )
+    # Image timing no longer belongs to AgentOutput. VisualContinuityAgent
+    # decides by returning a ShotSpec after it has interpreted this reply.
 
     return issues
 
@@ -268,10 +232,3 @@ def _mentions_outfit_or_scene(text: str) -> bool:
 def _reply_commits_state_change(reply: str) -> bool:
     text = reply or ""
     return any(word in text for word in COMPLETED_REPLY_PATTERNS) and _mentions_outfit_or_scene(text)
-
-
-def _reply_commits_visual_delivery(reply: str) -> bool:
-    text = reply or ""
-    if any(pattern in text for pattern in VISUAL_NON_FULFILLMENT_PATTERNS):
-        return False
-    return any(pattern in text for pattern in VISUAL_FULFILLMENT_PATTERNS)

@@ -1,10 +1,11 @@
 ﻿"""
 Momo Agent — 实时对话
-一次 LLM 调用完成角色决策、自然回复和高层图片目标
+一次 LLM 调用完成角色决策、剧情推进和自然回复
 """
 
 import json
 import logging
+import re
 from typing import Optional
 
 from ..core.context import (
@@ -17,9 +18,51 @@ from ..core.context import (
 from ..models.schemas import AgentOutput
 from ..core.compressor import estimate_tokens, needs_compression
 from ..core.characters import get_active
+from ..services.llm import is_content_policy_block
 from ..utils.helpers import read_markdown
 
 logger = logging.getLogger(__name__)
+
+
+_PLAIN_REPLY_MIN_CHARS = 16
+
+
+def _looks_like_policy_refusal(text: str) -> bool:
+    """Recognize textual model refusals that arrived with HTTP 200."""
+    value = str(text or "").strip()
+    if is_content_policy_block(value):
+        return True
+    return bool(re.search(
+        r"(?:抱歉|对不起|无法|不能|不可以|拒绝|无法协助).{0,80}"
+        r"(?:生成|描述|提供|协助|色情|情色|露骨|性行为|成人|强迫|安全|政策|内容)"
+        r"|(?:色情|情色|露骨|性行为|成人|强迫|连续性性描述).{0,80}"
+        r"(?:抱歉|对不起|无法|不能|不可以|拒绝|无法协助)",
+        value,
+        flags=re.IGNORECASE | re.DOTALL,
+    ))
+
+
+def _looks_like_plain_roleplay_reply(text: str) -> bool:
+    """Accept substantive role-play prose, but never provider diagnostics."""
+    value = str(text or "").strip()
+    if len(value) < _PLAIN_REPLY_MIN_CHARS or _looks_like_policy_refusal(value):
+        return False
+    normalized = value.lower()
+    diagnostic_markers = (
+        "traceback", "http status", "invalid request", "api error", "error:",
+        "exception", "jsondecodeerror",
+    )
+    return bool(re.search(r"[\u4e00-\u9fffA-Za-z]", value)) and not any(
+        marker in normalized for marker in diagnostic_markers
+    )
+
+
+class MomoOutputError(ValueError):
+    """A model reply that cannot be used as the character JSON contract."""
+
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
 
 
 class MomoAgent:
@@ -102,6 +145,9 @@ class MomoAgent:
         """
         character = character or get_active()
         system_prompt = self.system_prompt(character)
+        # Business manuals are visual-continuity inputs, not role-dialogue inputs.
+        # Keep the keyword for compatibility with older callers, but never inject it.
+        _ = business_knowledge
 
         # 1. 检查上下文窗口
         prompt = prepared_prompt or assemble_momo_prompt(
@@ -109,7 +155,6 @@ class MomoAgent:
             chat_history=chat_history,
             conversation_summary=conversation_summary,
             recalled_memories=recalled_memories,
-            business_knowledge=business_knowledge,
             interaction_mode=interaction_mode,
         )
         total_tokens = estimate_tokens(system_prompt + prompt)
@@ -124,7 +169,6 @@ class MomoAgent:
                     chat_history="",
                     conversation_summary=conversation_summary,
                     recalled_memories=recalled_memories,
-                    business_knowledge=business_knowledge,
                     interaction_mode=interaction_mode,
                 )
 
@@ -155,7 +199,7 @@ class MomoAgent:
             "validation_issues": issues,
             "instruction": (
                 "Return one corrected complete JSON outcome. Preserve the character's decision and voice, "
-                "and return only reply, image_goal, memory_candidate and persist_context. Do not explain."
+                "and return only reply, memory_candidate and persist_context. Do not explain."
             ),
         }
         raw = await self.llm.chat_prompt(
@@ -167,11 +211,14 @@ class MomoAgent:
 
     def _parse_output(self, raw: str) -> AgentOutput:
         """解析 LLM 输出的 JSON"""
-        import re
         try:
-            text = raw.strip()
-            # 去掉 <think>...</think> 推理块（Minimax M3 等推理模型）
-            text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+            raw_text = str(raw or "").strip()
+            think_blocks = re.findall(r"<think>(.*?)</think>", raw_text, flags=re.DOTALL | re.IGNORECASE)
+            # Never expose a model's hidden reasoning as role-play text.
+            text = re.sub(r"<think>.*?</think>", "", raw_text, flags=re.DOTALL | re.IGNORECASE).strip()
+            if not text:
+                code = "content_blocked" if _looks_like_policy_refusal("\n".join(think_blocks)) else "output_format_invalid"
+                raise MomoOutputError(code, "model returned no displayable content outside think block")
             # 去掉可能的 markdown 代码块标记
             if text.startswith("`"):
                 lines = text.split("\n")
@@ -184,21 +231,37 @@ class MomoAgent:
                 end = text.rfind("}")
                 if start >= 0 and end > start:
                     text = text[start:end + 1]
+            if not text.startswith("{"):
+                if _looks_like_plain_roleplay_reply(text):
+                    logger.warning("Momo returned plain role-play text; using it as reply without JSON metadata")
+                    return AgentOutput(
+                        reply=text,
+                        state_ops=[],
+                        image_goal=None,
+                        effects=[],
+                        image_intent=None,
+                        memory_candidate=None,
+                        photo_prompt=None,
+                        state_updates=None,
+                        immediate_memory=None,
+                        persist_context=True,
+                    )
+                code = "content_blocked" if _looks_like_policy_refusal(raw_text) else "output_format_invalid"
+                raise MomoOutputError(code, "model returned non-JSON non-roleplay text")
             data = json.loads(text)
             if not isinstance(data, dict):
                 raise ValueError("Momo output must be a JSON object")
             reply = str(data.get("reply") or "").strip()
             if not reply:
                 raise ValueError("Momo output requires a non-empty reply")
-            image_goal = data.get("image_goal")
-            if image_goal is not None and not isinstance(image_goal, dict):
-                raise ValueError("image_goal must be an object or null")
             return AgentOutput(
                 reply=reply,
                 # State fields remain readable on AgentOutput for old API
                 # callers, but the live MomoAgent no longer owns continuity.
                 state_ops=[],
-                image_goal=image_goal,
+                # Image timing belongs to VisualContinuityAgent. Ignore an
+                # image_goal emitted by an older cached model prompt.
+                image_goal=None,
                 effects=[],
                 image_intent=None,
                 memory_candidate=data.get("memory_candidate"),
@@ -207,6 +270,10 @@ class MomoAgent:
                 immediate_memory=data.get("immediate_memory"),
                 persist_context=data.get("persist_context", True),
             )
+        except MomoOutputError:
+            raise
         except (json.JSONDecodeError, KeyError, ValueError) as e:
-            logger.warning(f"解析 Agent 输出失败: {e}, raw={raw[:200]}")
-            raise ValueError(f"invalid Momo output: {e}") from e
+            raw_preview = str(raw or "")[:200]
+            logger.warning(f"解析 Agent 输出失败: {e}, raw={raw_preview}")
+            code = "content_blocked" if _looks_like_policy_refusal(raw_preview) else "output_format_invalid"
+            raise MomoOutputError(code, f"invalid Momo output: {e}") from e

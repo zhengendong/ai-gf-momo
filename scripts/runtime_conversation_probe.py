@@ -97,7 +97,10 @@ def setup_temp_app(root: Path):
         },
     }, ensure_ascii=False, indent=2))
     write(char_dir / "identity.md", "你叫探针，只用于运行时测试。")
-    write(char_dir / "user.json", json.dumps({"user_pet_name": "测试员"}, ensure_ascii=False))
+    write(
+        char_dir / "user.json",
+        json.dumps({"gender": "male", "user_pet_name": "测试员"}, ensure_ascii=False),
+    )
     write(char_dir / "memory" / "status.md", """# 探针的状态
 ## 穿着
 - white_shirt
@@ -134,7 +137,16 @@ def no_change(reason: str = "无视觉状态变化。") -> dict:
     return {
         "reason": reason,
         "state_patch": {"wardrobe": {}, "scene": None},
-        "shot_spec": None,
+        "shot": None,
+    }
+
+
+def visual_shot(reason: str, action: str = "presenting_current_scene") -> dict:
+    return {
+        "reason": reason,
+        "camera": {"view": "medium_shot", "angle": "front_view", "pov": False},
+        "action": {"tags": [action], "text": None},
+        "environment": "current setting",
     }
 
 
@@ -143,26 +155,15 @@ def initial_state_patch() -> dict:
         "reason": "开场已明确建立时间、地点和完整穿着。",
         "state_patch": {
             "wardrobe": {
-                "upper": {"mode": "replace", "layers": [{
-                    "id": "cardigan_1", "slots": ["upper"],
-                    "category": "outerwear", "tags": ["cream_knit_cardigan"],
-                }]},
-                "lower": {"mode": "replace", "layers": [{
-                    "id": "long_skirt_1", "slots": ["lower"],
-                    "category": "outerwear", "tags": ["brown_long_skirt"],
-                }]},
-                "legwear": {"mode": "replace", "layers": [{
-                    "id": "ankle_socks_1", "slots": ["legwear"],
-                    "category": "legwear", "tags": ["white_ankle_socks"],
-                }]},
-                "footwear": {"mode": "replace", "layers": [{
-                    "id": "canvas_shoes_1", "slots": ["footwear"],
-                    "category": "footwear", "tags": ["beige_canvas_shoes"],
-                }]},
+                "upper": ["cream_knit_cardigan"],
+                "lower": ["brown_long_skirt"],
+                "legwear": ["white_ankle_socks"],
+                "footwear": ["beige_canvas_shoes"],
+                "accessories": [],
             },
-            "scene": {"mode": "replace", "tags": ["bookstore", "rainy_afternoon"]},
+            "scene": ["bookstore", "rainy_afternoon"],
         },
-        "shot_spec": None,
+        "shot": visual_shot("新开场建立了值得呈现的地点和穿着。", "holding_book"),
     }
 
 
@@ -201,6 +202,7 @@ async def run_case(name: str, messages: list[str], llm_outputs: list[dict | str]
             "footwear_removed": "black_mary_jane_shoes" not in status,
             "history_role_order": [item.get("role") for item in history[:4]],
             "chunk_type_order": [chunk.type for chunk in sender.chunks],
+            "image_count": sum(chunk.type == "image" for chunk in sender.chunks),
             "memory_update_notified": any(chunk.type == "memory_updated" for chunk in sender.chunks),
             "second_main_prompt_has_first_turn": len(previews) >= 3 and "蓝莓" in previews[2],
             "main_prompt_marks_status_objective": bool(llm.calls) and "本轮开始时的客观视觉事实" in llm.calls[0]["user"],
@@ -226,7 +228,6 @@ async def run_scene_transition_case():
     llm = FakeLLM([
         {
             "reply": "几天后的午后，她穿着校服站在教学楼走廊，朝你挥了挥手。",
-            "image_goal": None,
             "memory_candidate": None,
             "persist_context": True,
         },
@@ -253,7 +254,7 @@ async def run_scene_transition_case():
                 },
                 "scene": {"mode": "replace", "tags": ["school_hallway", "afternoon"]},
             },
-            "shot_spec": None,
+            "shot": visual_shot("新的学校场景与校服值得呈现。", "waving"),
         },
     ])
     runtime = AgentRuntime(llm, FakeComfy(), sender)
@@ -268,7 +269,8 @@ async def run_scene_transition_case():
     visual_payload = json.loads(llm.calls[1]["user"])
     assert visual_payload["interaction_mode"] == "scene_transition"
     assert "界面触发的剧情推进任务" in llm.calls[0]["user"]
-    assert [item["type"] for item in history[-2:]] == ["scene_divider", "text"]
+    narrative_history = [item for item in history if item.get("type") != "image"]
+    assert [item["type"] for item in narrative_history[-2:]] == ["scene_divider", "text"]
     assert all("用户对下一幕的构想" not in item.get("content", "") for item in history)
     assert chunk_types.index("state_update") < chunk_types.index("scene_divider") < chunk_types.index("text")
     assert "school_hallway" in read_status(CHARACTER)
@@ -277,7 +279,7 @@ async def run_scene_transition_case():
         "llm_calls": len(llm.calls),
         "checks": {
             "chunk_type_order": chunk_types,
-            "history_tail_types": [item["type"] for item in history[-2:]],
+            "history_tail_types": [item["type"] for item in narrative_history[-2:]],
             "hidden_instruction_not_persisted": True,
             "interaction_mode_forwarded": True,
         },
@@ -296,7 +298,6 @@ async def run_initial_scene_case():
     llm = FakeLLM([
         {
             "reply": "雨声落在旧书店的玻璃窗上。她穿着米色针织开衫和棕色长裙，抱着书朝你笑了笑：‘你也喜欢这本吗？’",
-            "image_goal": None,
             "memory_candidate": None,
             "persist_context": True,
         },
@@ -309,8 +310,12 @@ async def run_initial_scene_case():
 
     history = read_chat_history(CHARACTER)
     chunk_types = [chunk.type for chunk in sender.chunks]
+    visual_payload = json.loads(llm.calls[1]["user"])
     assert is_state_initialized(CHARACTER)
-    assert [item["type"] for item in history] == ["scene_divider", "text"]
+    assert visual_payload["previous_state"]["initialized"] is False
+    assert visual_payload["previous_state"]["wardrobe"] is None
+    narrative_history = [item for item in history if item.get("type") != "image"]
+    assert [item["type"] for item in narrative_history] == ["scene_divider", "text"]
     assert chunk_types.index("state_update") < chunk_types.index("scene_divider") < chunk_types.index("text")
     assert "初始场景事实构想" in llm.calls[0]["user"]
     assert "不要机械复刻" in llm.calls[0]["user"]
@@ -319,9 +324,54 @@ async def run_initial_scene_case():
         "case": "initial_scene_character_first",
         "checks": {
             "initialized": True,
-            "history_types": [item["type"] for item in history],
+            "history_types": [item["type"] for item in narrative_history],
             "chunk_type_order": chunk_types,
             "template_is_hidden": True,
+        },
+    }
+
+
+async def run_invalid_initial_scene_case():
+    write_uninitialized_state(CHARACTER)
+    sender = CapturingSender()
+    invalid_patch = {
+        "reason": "uses unsupported scene fields",
+        "state_patch": {
+            "wardrobe": {
+                "upper": {"mode": "replace", "layers": []},
+                "lower": {"mode": "replace", "layers": []},
+                "legwear": {"mode": "replace", "layers": []},
+                "footwear": {"mode": "replace", "layers": []},
+            },
+            "scene": {"mode": "replace", "location": "bookstore", "time": "afternoon"},
+        },
+        "shot": None,
+    }
+    llm = FakeLLM([
+        {"reply": "雨日下午，她穿着针织衫站在旧书店里。", "memory_candidate": None, "persist_context": True},
+        invalid_patch,
+        invalid_patch,
+    ])
+    runtime = AgentRuntime(llm, FakeComfy(), sender)
+    await runtime.handle_initial_scene("invalid_initial_session", CHARACTER)
+    if bg_tasks.active_count:
+        await asyncio.gather(*list(bg_tasks._tasks), return_exceptions=True)
+
+    chunk_types = [chunk.type for chunk in sender.chunks]
+    assert not is_state_initialized(CHARACTER)
+    assert "scene_divider" not in chunk_types
+    assert "text" not in chunk_types
+    assert any(
+        chunk.type == "status_update" and "缺少完整穿着或时间地点" in chunk.content
+        for chunk in sender.chunks
+    )
+    assert read_chat_history(CHARACTER) == []
+    return {
+        "case": "invalid_initial_scene_not_persisted",
+        "checks": {
+            "initialized": False,
+            "chunk_type_order": chunk_types,
+            "history_empty": True,
         },
     }
 
@@ -334,15 +384,19 @@ async def run_initial_scene_with_first_message_case():
         }
     })
     saved = get_profile(CHARACTER)["initial_scene"]
+    images_dir = settings.get_images_dir(CHARACTER)
+    write(images_dir / "_history.json", json.dumps([{"image_url": "/static/probe/images/old.png"}]))
+    write(images_dir / "old.png", "obsolete image")
     reset_character_memory(CHARACTER)
     assert not is_state_initialized(CHARACTER)
     assert get_profile(CHARACTER)["initial_scene"] == saved
+    assert not list(images_dir.iterdir())
+    assert (settings.get_memory_dir(CHARACTER) / "state_snapshot.json").exists()
 
     sender = CapturingSender()
     llm = FakeLLM([
         {
             "reply": "雨日下午，旧书店里很安静。她穿着米色针织开衫和棕色长裙，从书架后抬起头：‘你好。’",
-            "image_goal": None,
             "memory_candidate": None,
             "persist_context": True,
         },
@@ -355,9 +409,10 @@ async def run_initial_scene_with_first_message_case():
 
     history = read_chat_history(CHARACTER)
     assert is_state_initialized(CHARACTER)
-    assert [item["type"] for item in history] == ["scene_divider", "text", "text"]
-    assert [item["role"] for item in history] == ["system", "user", "assistant"]
-    assert history[1]["content"] == "你好，请问这本书放在哪里？"
+    narrative_history = [item for item in history if item.get("type") != "image"]
+    assert [item["type"] for item in narrative_history] == ["scene_divider", "text", "text"]
+    assert [item["role"] for item in narrative_history] == ["system", "user", "assistant"]
+    assert narrative_history[1]["content"] == "你好，请问这本书放在哪里？"
     assert "玩家第一条消息：你好，请问这本书放在哪里？" in llm.calls[0]["user"]
     assert all("根据角色身份" not in item.get("content", "") for item in history)
     return {
@@ -365,8 +420,8 @@ async def run_initial_scene_with_first_message_case():
         "checks": {
             "template_survives_reset": True,
             "initialized": True,
-            "history_types": [item["type"] for item in history],
-            "history_roles": [item["role"] for item in history],
+            "history_types": [item["type"] for item in narrative_history],
+            "history_roles": [item["role"] for item in narrative_history],
             "first_message_persisted_verbatim": True,
         },
     }
@@ -378,10 +433,9 @@ async def main():
         results = []
 
         setup_temp_app(root)
-        results.append(await run_case("complete_state_update", ["换装后直接给我看"], [
+        complete_state = await run_case("complete_state_update", ["换装后直接给我看"], [
             {
                 "reply": "换好了，我穿着黑色吊带背心和黑色短裤站在你面前。",
-                "image_goal": {"purpose": "展示换装结果", "visibility": "clear"},
                 "memory_candidate": None,
                 "persist_context": True,
             },
@@ -400,49 +454,46 @@ async def main():
                     },
                     "scene": None,
                 },
-                "shot_spec": {
-                    "reason": "展示换装结果",
-                    "role_tags": ["1girl", "solo"],
-                    "body_tags": ["petite"],
-                    "appearance_tags": ["black_hair", "brown_eyes"],
-                    "wardrobe_tags": ["black tank top", "black short shorts"],
-                    "scene_tags": ["bedroom"],
-                    "action_tags": ["showing_outfit"],
-                    "action_text": "She displays her changed outfit while standing in front of the viewer.",
-                    "pose": ["standing"],
-                    "expression": ["smile"],
-                    "camera": {"shot": "full_body", "angle": "front_view", "focus": None, "pov": False},
-                    "environment_text": "She stands near the bed in a quiet bedroom.",
-                    "lighting": [], "rating": "general",
+                "shot": {
+                    "camera": {"view": "full_shot", "angle": "front_view", "pov": False},
+                    "action": {
+                        "tags": ["standing", "showing_outfit", "smile"],
+                        "text": "displaying the changed outfit toward the viewer",
+                    },
+                    "environment": "quiet bedroom, standing near the bed",
                 },
             },
-        ]))
+        ])
+        assert complete_state["checks"]["image_count"] == 1
+        results.append(complete_state)
 
         setup_temp_app(root)
-        results.append(await run_case("continuity_state_parse", ["脱掉丝袜"], [
-            {"reply": "她把丝袜褪下，放到床边。", "image_goal": None, "memory_candidate": None, "persist_context": True},
+        state_change = await run_case("continuity_state_parse", ["脱掉丝袜"], [
+            {"reply": "她把丝袜褪下，放到床边。", "memory_candidate": None, "persist_context": True},
             {
                 "reason": "丝袜已经脱下。",
                 "state_patch": {"wardrobe": {"legwear": {"mode": "replace", "layers": []}}, "scene": None},
-                "shot_spec": None,
+                "shot": visual_shot("丝袜已经脱下，展示变化后的腿部。", "presenting_legs"),
             },
-        ]))
+        ])
+        assert state_change["checks"]["image_count"] == 1
+        results.append(state_change)
 
         setup_temp_app(root)
         results.append(await run_case("continuity_retry", ["把鞋脱了"], [
-            {"reply": "她弯腰脱下鞋，赤脚站在地毯上。", "image_goal": None, "memory_candidate": None, "persist_context": True},
+            {"reply": "她弯腰脱下鞋，赤脚站在地毯上。", "memory_candidate": None, "persist_context": True},
             "not-json",
             {
                 "reason": "修复后确认鞋已脱下。",
                 "state_patch": {"wardrobe": {"footwear": {"mode": "replace", "layers": []}}, "scene": None},
-                "shot_spec": None,
+                "shot": visual_shot("鞋已经脱下，展示变化后的脚部。", "presenting_feet"),
             },
         ]))
 
         setup_temp_app(root)
         results.append(await run_case("memory_candidate_refresh", ["我一直最喜欢蓝莓"], [
             {
-                "reply": "蓝莓啊，我记住了。", "image_goal": None,
+                "reply": "蓝莓啊，我记住了。",
                 "memory_candidate": "用户明确表示长期喜欢蓝莓。", "persist_context": True,
             },
             no_change(),
@@ -451,20 +502,21 @@ async def main():
 
         setup_temp_app(root)
         results.append(await run_case("two_turn_memory", ["记住暗号是蓝莓", "刚才暗号是什么"], [
-            {"reply": "我记住了，暗号是蓝莓。", "image_goal": None, "memory_candidate": None, "persist_context": True},
+            {"reply": "我记住了，暗号是蓝莓。", "memory_candidate": None, "persist_context": True},
             no_change(),
-            {"reply": "刚才暗号是蓝莓。", "image_goal": None, "memory_candidate": None, "persist_context": True},
+            {"reply": "刚才暗号是蓝莓。", "memory_candidate": None, "persist_context": True},
             no_change(),
         ]))
 
         setup_temp_app(root)
         seed_chat_history(root, pairs=40)
         large_history = await run_case("large_history_latency", ["现在正常回复一句"], [
-            {"reply": "收到，我正常回复一句。", "image_goal": None, "memory_candidate": None, "persist_context": True},
+            {"reply": "收到，我正常回复一句。", "memory_candidate": None, "persist_context": True},
             no_change(),
         ])
         assert large_history["checks"]["visual_history_messages"] == [16]
         assert large_history["checks"]["main_prompt_marks_status_objective"]
+        assert large_history["checks"]["image_count"] == 0
         results.append(large_history)
 
         setup_temp_app(root)
@@ -472,6 +524,9 @@ async def main():
 
         setup_temp_app(root)
         results.append(await run_initial_scene_case())
+
+        setup_temp_app(root)
+        results.append(await run_invalid_initial_scene_case())
 
         setup_temp_app(root)
         results.append(await run_initial_scene_with_first_message_case())

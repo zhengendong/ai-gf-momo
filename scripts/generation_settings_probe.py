@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import asyncio
 import sys
 import tempfile
 from pathlib import Path
@@ -12,8 +13,9 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from backend.config import settings
+from backend.api.routes import list_comfyui_workflows
 from backend.services.comfyui import ComfyUIService
-from backend.services.generation_settings import load_generation_settings
+from backend.services.generation_settings import load_comfyui_base_url, load_generation_settings
 
 
 def _ksampler_inputs(workflow: dict) -> dict:
@@ -76,18 +78,29 @@ def main():
     service = ComfyUIService()
     try:
         with tempfile.TemporaryDirectory(prefix="ai_gf_generation_probe_") as tmp:
-            settings.base_dir = Path(tmp)
+            root = Path(tmp)
+            settings.base_dir = root
             config_dir = settings.base_dir / "config"
             config_dir.mkdir(parents=True)
             config_file = config_dir / "settings.json"
+            workflow_root = root / "workflow-root"
+            workflow_dir = workflow_root / "ComfyUI" / "user" / "default" / "workflows"
+            workflow_dir.mkdir(parents=True)
+            (workflow_dir / "alpha.json").write_text("{}", encoding="utf-8")
+            (workflow_dir / "ignore.txt").write_text("", encoding="utf-8")
+            listed = asyncio.run(list_comfyui_workflows(str(workflow_root)))
+            assert listed == {"workflows": ["alpha.json"]}
 
             config_file.write_text(json.dumps({
                 "comfyui": {
+                    "base_url": "http://127.0.0.1:8190/comfy",
                     "root_dir": "D:/ComfyUI",
                     "workflow": "ANIMA_workflow.json",
                 },
             }), encoding="utf-8")
             inherited_profile = load_generation_settings()
+            assert load_comfyui_base_url() == "http://127.0.0.1:8190/comfy"
+            assert service.base_url == "http://127.0.0.1:8190/comfy"
             assert inherited_profile.workflow_dir == Path("D:/ComfyUI/ComfyUI/user/default/workflows")
             template = json.loads(
                 (inherited_profile.workflow_dir / inherited_profile.workflow).read_text(encoding="utf-8")

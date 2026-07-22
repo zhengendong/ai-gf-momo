@@ -9,7 +9,7 @@ from typing import Protocol
 from ..agents.image import ImagePipeline
 from ..agents.image_director import VisualContinuityAgent, VisualContinuityError
 from ..agents.memory import MemoryAgent
-from ..agents.momo import MomoAgent
+from ..agents.momo import MomoAgent, MomoOutputError
 from ..config import settings
 from ..core.chat_history import append_chat_pair, append_initial_scene, append_scene_transition, read_chat_history
 from ..core.characters import get_profile, normalize_initial_scene
@@ -32,9 +32,9 @@ from ..core.memory_policy import (
     recall_vector_context,
     reset_condense_counter,
 )
-from ..core.business_knowledge import load_relevant_knowledge
 from ..core.image_job import build_image_job
 from ..core.orchestrator import bg_tasks
+from ..services.llm import LLMServiceError
 from ..core.state import (
     apply_state_operations,
     apply_state_updates,
@@ -61,7 +61,8 @@ SCENE_TRANSITION_BASE = (
 INITIAL_SCENE_BASE = (
     "根据角色身份、性格、人物关系和初始场景构想，构建故事真正开始时的第一幕。"
     "必须自然且明确地建立虚拟故事的时间或时间段、具体地点与环境、角色当前实际穿着，"
-    "以及角色正在进行的动作或所处状态。直接输出已经发生的故事开场，不要解释设计过程。"
+    "以及角色正在进行的动作或所处状态。穿着必须清楚到能判断上身、下身、腿部和鞋子；"
+    "没有对应衣物时也要自然表达实际裸露或赤足。直接输出已经发生的故事开场，不要解释设计过程。"
 )
 
 
@@ -296,11 +297,6 @@ class AgentRuntime:
                 recent_context = "\n".join(
                     str(item.get("content") or "") for item in persisted
                 )
-            routing_content = persisted_user_message or content
-            business_knowledge = load_relevant_knowledge(
-                routing_content,
-                recent_context,
-            )
             # Context selection only needs a small seed; assemble the full
             # Momo prompt once, after the history window is known.
             base_prompt = content
@@ -320,6 +316,7 @@ class AgentRuntime:
             context_compression_plan = context_window.compression_plan
             if not chat_history and history:
                 chat_history = "\n".join(history[-MAX_HISTORY_TURNS:])
+            routing_content = persisted_user_message or content
             recalled_memories = recall_vector_context(char, routing_content)
             prepared_prompt = assemble_momo_prompt(
                 char,
@@ -327,7 +324,6 @@ class AgentRuntime:
                 chat_history=chat_history,
                 conversation_summary=summary,
                 recalled_memories=recalled_memories,
-                business_knowledge=business_knowledge,
                 interaction_mode=interaction_mode,
             )
             logger.info(
@@ -345,7 +341,6 @@ class AgentRuntime:
                 chat_history=chat_history,
                 conversation_summary=summary,
                 recalled_memories=recalled_memories,
-                business_knowledge=business_knowledge,
                 interaction_mode=interaction_mode,
                 prepared_prompt=prepared_prompt,
             )
@@ -390,10 +385,8 @@ class AgentRuntime:
                     character=char,
                     user_message=content,
                     reply=output.reply,
-                    image_goal=output.image_goal,
                     previous_state=previous_snapshot,
                     recent_dialogue=recent_visual_dialogue,
-                    business_knowledge=business_knowledge,
                     interaction_mode=interaction_mode,
                 )
                 is_initial_scene = interaction_mode.startswith("initial_scene")
@@ -405,10 +398,14 @@ class AgentRuntime:
                 )
             except (VisualContinuityError, TypeError, ValueError) as exc:
                 logger.warning(
-                    "Visual continuity failed for %s; using local image fallback without another model call: %s",
+                    "Visual continuity failed for %s; preserving the previous state without another model call: %s",
                     char,
                     exc,
                 )
+                if interaction_mode.startswith("initial_scene"):
+                    raise VisualContinuityError(
+                        f"initial scene continuity could not be committed: {exc}"
+                    ) from exc
             logger.info(
                 "Runtime continuity done: character=%s elapsed=%.3fs changed=%s",
                 char,
@@ -417,29 +414,19 @@ class AgentRuntime:
             )
 
             stage = "image_job"
-            if continuity is None:
-                shot_spec = (
-                    self.visual_continuity_agent.fallback_shot(
-                        char,
-                        output.image_goal,
-                        frozen_snapshot,
-                    )
-                    if output.image_goal
-                    else None
-                )
-            else:
+            if continuity is not None:
                 shot_spec = self.visual_continuity_agent.harmonize_shot(
                     continuity.shot_spec,
-                    output.image_goal,
                     frozen_snapshot,
                 )
+            else:
+                shot_spec = None
             image_job = build_image_job(
                 char,
                 output.reply,
                 image_intent=shot_spec,
                 state_snapshot=frozen_snapshot,
-                image_goal=output.image_goal,
-            ) if output.image_goal else None
+            ) if shot_spec else None
 
             stage = "reply_delivery"
             if wrote_runtime_state:
@@ -549,8 +536,12 @@ class AgentRuntime:
             )
             stage_messages = {
                 "context": "上下文准备失败，请重新发送。",
-                "momo": "角色回复生成失败，请重新发送。",
-                "visual_continuity": "本轮内部处理异常，请重新发送。",
+                "momo": self._momo_error_message(e),
+                "visual_continuity": (
+                    self._initial_scene_error_message(e)
+                    if interaction_mode.startswith("initial_scene")
+                    else "本轮内部处理异常，请重新发送。"
+                ),
                 "image_job": "图片任务准备失败，请重新发送。",
                 "reply_delivery": "本轮回复发送失败，请重新发送。",
             }
@@ -559,6 +550,36 @@ class AgentRuntime:
                 char,
                 stage_messages.get(stage, "本轮处理失败，请重新发送。"),
             )
+
+    @staticmethod
+    def _momo_error_message(error: Exception) -> str:
+        """Return a precise, safe user-facing reason for a Momo-stage failure."""
+        code = getattr(error, "code", "")
+        messages = {
+            "content_blocked": "本轮内容被当前模型的安全策略拒绝，请调整内容或切换模型后重试。",
+            "rate_limited": "模型服务当前限流，请稍后再试。",
+            "request_timed_out": "模型服务响应超时，请稍后重试。",
+            "connection_failed": "无法连接模型服务，请检查网络或模型接口配置。",
+            "authentication_failed": "模型接口鉴权失败，请检查模型配置和密钥。",
+            "provider_unavailable": "模型服务暂时不可用，请稍后重试。",
+            "context_rejected": "本轮上下文被模型拒绝，建议缩短上下文窗口后重试。",
+            "request_rejected": "模型接口拒绝了本次请求，请检查模型配置后重试。",
+            "provider_response_invalid": "模型服务返回了异常响应，请稍后重试。",
+            "output_format_invalid": "模型回复格式异常，请重新发送。",
+        }
+        if isinstance(error, (LLMServiceError, MomoOutputError)):
+            return messages.get(code, "模型服务发生未知异常，请重新发送。")
+        return "角色回复生成失败，请重新发送。"
+
+    @staticmethod
+    def _initial_scene_error_message(error: Exception) -> str:
+        """Explain an initialization failure without exposing model output."""
+        detail = str(error or "").lower()
+        if any(token in detail for token in ("expecting value", "json", "output must be")):
+            return "初始场景的视觉导演回复格式异常，已保持未开场状态；请重试。"
+        if any(token in detail for token in ("完整服饰槽位", "明确角色实际穿着", "明确时间和地点")):
+            return "初始场景缺少完整穿着或时间地点，已保持未开场状态；请重试。"
+        return "初始场景视觉状态校验失败，已保持未开场状态；请重试。"
 
     async def refresh_memory(self, session_id: str, character: str, target: str = "all"):
         label = self._condense_target_label(target)

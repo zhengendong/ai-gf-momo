@@ -120,8 +120,11 @@ def assemble_momo_prompt(
     from .memory_v3 import load_user_profile as _load_user_profile
     from .memory_v3 import render_user_profile as _render_user_profile
     profile = _load_user_profile(character)
-    user_profile = _render_user_profile(profile)
+    # Gender is stated once in the participant facts below.
+    user_profile = _render_user_profile({**profile, "gender": ""})
     user_pet_name = profile.get("user_pet_name") or "用户"
+    character_profile = load_character_profile(character)
+    character_gender = str(character_profile.get("gender") or "").strip()
 
     # `status.md` is the readable projection while the snapshot is the
     # structured initialization flag. Avoid calling is_state_initialized(),
@@ -141,6 +144,10 @@ def assemble_momo_prompt(
 
     parts = [
         "# 当前上下文包",
+        "",
+        "## 0. 参与者事实",
+        f"- 角色性别：{character_gender or '未设置'}",
+        f"- 玩家性别：{profile.get('gender') or '未设置'}",
         "",
         "## 1. user.json（用户信息）",
         user_profile or "（未填写）",

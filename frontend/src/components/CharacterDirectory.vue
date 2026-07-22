@@ -50,6 +50,24 @@
         <label>头像 emoji</label>
         <input v-model="form.avatar" placeholder="💗" />
       </div>
+      <div class="form-row">
+        <div class="form-field">
+          <label>角色性别</label>
+          <select v-model="form.character_gender">
+            <option value="" disabled>请选择</option>
+            <option value="female">女性</option>
+            <option value="male">男性</option>
+          </select>
+        </div>
+        <div class="form-field">
+          <label>玩家性别</label>
+          <select v-model="form.player_gender">
+            <option value="" disabled>请选择</option>
+            <option value="female">女性</option>
+            <option value="male">男性</option>
+          </select>
+        </div>
+      </div>
       <SkinTagAssistant @apply="applySkinMapping" />
       <div class="form-field">
         <label>角色锚点标签</label>
@@ -101,7 +119,7 @@
         </select>
       </div>
       <div class="modal-actions">
-        <button class="primary" @click="saveModal" :disabled="!form.id">创建</button>
+        <button class="primary" @click="saveModal" :disabled="!form.id || !form.character_gender || !form.player_gender">创建</button>
         <button @click="closeModal">取消</button>
       </div>
     </div>
@@ -152,6 +170,8 @@ function defaultForm() {
     id: '',
     name: '',
     avatar: '💕',
+    character_gender: '',
+    player_gender: '',
     role_tags: '',
     body_tags: '',
     appearance_tags: '',
@@ -198,9 +218,10 @@ function applySkinMapping(item) {
 }
 
 async function saveModal() {
-  if (!form.id) return
+  if (!form.id || !form.character_gender || !form.player_gender) return
   await createCharacter(form.id, {
     name: form.name || form.id,
+    gender: form.character_gender,
     avatar: form.avatar,
     visual_anchor: {
       role_tags: form.role_tags,
@@ -209,6 +230,7 @@ async function saveModal() {
     },
     identity: form.identity,
     user_profile: {
+      gender: form.player_gender,
       user_pet_name: form.user_pet_name,
       identity: form.user_identity,
       communication_style: form.communication_style,
@@ -416,7 +438,7 @@ async function confirmDelete() {
 .form-row { display: flex; gap: 12px; }
 .form-field { display: flex; flex-direction: column; gap: 4px; flex: 1; margin-bottom: 10px; }
 .form-field label { font-size: 12px; color: var(--text-light); }
-.form-field input, .form-field textarea {
+.form-field input, .form-field textarea, .form-field select {
   width: 100%;
   border: 1px solid var(--border-light);
   background: var(--bg-lighter);

@@ -17,6 +17,7 @@ import websockets
 from ..config import settings
 from ..core.characters import get_active
 from ..core.context import load_character_profile
+from .generation_settings import load_comfyui_base_url
 from .workflow_adapter import WorkflowAdapter, load_workflow_adapter
 
 logger = logging.getLogger(__name__)
@@ -49,18 +50,34 @@ class ComfyUIService:
     """ComfyUI 服务"""
 
     def __init__(self):
-        self.base_url = settings.comfyui.base_url
         self._client: Optional[httpx.AsyncClient] = None
+        self._client_base_url: str | None = None
+        self._base_url_override: str | None = None
         # 跟踪正在进行的任务
         self._active_tasks: dict[str, dict] = {}
 
+    @property
+    def base_url(self) -> str:
+        """Use the saved UI setting, falling back to COMFYUI_HOST/PORT."""
+        return (self._base_url_override or load_comfyui_base_url()).rstrip("/")
+
+    @base_url.setter
+    def base_url(self, value: str):
+        """Compatibility override for isolated callers and transport probes."""
+        self._base_url_override = str(value or "").strip() or None
+
     async def _get_client(self) -> httpx.AsyncClient:
         """获取 HTTP 客户端"""
+        base_url = self.base_url
+        if self._client is not None and not self._client.is_closed and self._client_base_url != base_url:
+            await self._client.aclose()
+            self._client = None
         if self._client is None or self._client.is_closed:
             self._client = httpx.AsyncClient(
-                base_url=self.base_url,
+                base_url=base_url,
                 timeout=120.0  # 图像生成可能需要较长时间
             )
+            self._client_base_url = base_url
         return self._client
 
     async def check_status(self) -> bool:

@@ -14,6 +14,7 @@ from backend.core.wardrobe import (
     derived_absence_tags,
     reduce_wardrobe,
     wardrobe_agent_view,
+    wardrobe_director_view,
     wardrobe_all_tags,
     wardrobe_from_tags,
     wardrobe_visible_tags,
@@ -133,6 +134,30 @@ def main():
         "white blouse", "pleated skirt", "black stockings",
         "black high heels",
     ]
+    assert wardrobe_director_view(layered) == {
+        "upper": ["white_bra", "white_blouse"],
+        "lower": ["white_panties", "pleated_skirt"],
+        "legwear": ["black_stockings"],
+        "footwear": ["black_high_heels"],
+        "accessories": [],
+    }
+
+    # The normal director protocol uses string arrays; identical phrases in
+    # upper/lower become one canonical multi-slot garment.
+    simple = apply_wardrobe_patch(layered, {
+        "upper": ["white_lace_bra", "red_evening_dress"],
+        "lower": ["white_lace_panties", "red_evening_dress"],
+        "legwear": [],
+        "footwear": ["black_high_heels"],
+    })
+    dress_ids = [
+        item_id for item_id, item in simple["items"].items()
+        if item["tags"] == ["red_evening_dress"]
+    ]
+    assert len(dress_ids) == 1
+    assert simple["items"][dress_ids[0]]["slots"] == ["upper", "lower"]
+    assert dress_ids[0] in simple["layers"]["upper"]
+    assert dress_ids[0] in simple["layers"]["lower"]
 
     # Removing underwear while retaining outerwear records known absence without
     # incorrectly making the outer garment disappear.

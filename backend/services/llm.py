@@ -14,6 +14,53 @@ from ..config import settings
 logger = logging.getLogger(__name__)
 
 
+class LLMServiceError(RuntimeError):
+    """A safe, user-classifiable failure from an upstream chat provider."""
+
+    def __init__(self, code: str, message: str, *, status_code: int | None = None):
+        super().__init__(message)
+        self.code = code
+        self.status_code = status_code
+
+
+POLICY_MARKERS = (
+    "content_filter", "content filter", "content policy", "safety policy",
+    "moderation", "safety", "unsafe", "policy violation", "violat",
+    "内容审核", "内容安全", "安全策略", "内容策略", "违规", "敏感内容",
+    "无法协助生成", "无法提供色情", "无法提供露骨",
+)
+
+CONTEXT_MARKERS = (
+    "context length", "context window", "maximum context", "too many tokens",
+    "max tokens", "token limit", "上下文长度", "上下文窗口",
+)
+
+
+def is_content_policy_block(text: str) -> bool:
+    """Recognize provider safety rejections without exposing their raw body."""
+    normalized = str(text or "").lower()
+    return any(marker in normalized for marker in POLICY_MARKERS)
+
+
+def classify_http_failure(status_code: int, body: str) -> str:
+    """Map an OpenAI-compatible HTTP failure to a stable public error code."""
+    if is_content_policy_block(body):
+        return "content_blocked"
+    if any(marker in str(body or "").lower() for marker in CONTEXT_MARKERS):
+        return "context_rejected"
+    if status_code in {401, 403}:
+        return "authentication_failed"
+    if status_code == 429:
+        return "rate_limited"
+    if status_code in {408, 504}:
+        return "request_timed_out"
+    if 500 <= status_code <= 599:
+        return "provider_unavailable"
+    if status_code in {400, 413, 422}:
+        return "request_rejected"
+    return "provider_error"
+
+
 class LLMService:
     """LLM 服务"""
 
@@ -107,7 +154,20 @@ class LLMService:
                 from ..core.compressor import estimate_tokens
                 prompt_text = json.dumps(payload, ensure_ascii=False)
                 logger.error(f"422 请求大小: {len(prompt_text)} 字符 ~{estimate_tokens(prompt_text)} tokens")
-            raise
+            raise LLMServiceError(
+                classify_http_failure(e.response.status_code, body),
+                f"upstream LLM HTTP {e.response.status_code}",
+                status_code=e.response.status_code,
+            ) from e
+        except httpx.TimeoutException as e:
+            logger.error(f"LLM 请求超时: {e}")
+            raise LLMServiceError("request_timed_out", "upstream LLM request timed out") from e
+        except httpx.RequestError as e:
+            logger.error(f"LLM 网络请求失败: {e}")
+            raise LLMServiceError("connection_failed", "upstream LLM connection failed") from e
+        except (KeyError, IndexError, TypeError, json.JSONDecodeError) as e:
+            logger.error(f"LLM 响应结构异常: {e}")
+            raise LLMServiceError("provider_response_invalid", "upstream LLM response is malformed") from e
         except Exception as e:
             logger.error(f"LLM 调用失败: {e}")
             raise
